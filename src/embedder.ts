@@ -483,6 +483,21 @@ const EMBED_TIMEOUT_MS = 10_000;
 /** Default SDK-level HTTP timeout for embedding requests, including batch calls. */
 const DEFAULT_EMBED_CLIENT_TIMEOUT_MS = 30_000;
 
+/**
+ * Resolve the outer single-operation timeout.
+ *
+ * Keep the historical 10s guard when no explicit client timeout is configured,
+ * but never let that guard cut off a deliberately larger provider timeout. This
+ * matters for CPU-only local providers (for example Ollama) where a cold model
+ * load can legitimately take longer than 10 seconds.
+ */
+export function resolveEmbeddingOperationTimeoutMs(configuredClientTimeoutMs?: number): number {
+  if (!Number.isFinite(configuredClientTimeoutMs) || configuredClientTimeoutMs! <= 0) {
+    return EMBED_TIMEOUT_MS;
+  }
+  return Math.max(EMBED_TIMEOUT_MS, Math.floor(configuredClientTimeoutMs!));
+}
+
 /** Bounded startup health probe timeout; normal embeddings keep the larger client timeout. */
 const EMBED_HEALTH_CHECK_TIMEOUT_MS = 7_500;
 
@@ -540,6 +555,7 @@ export class Embedder {
   private readonly _capabilities: EmbeddingCapabilities;
   private readonly _apiKeys: string[];
   private readonly _clientTimeoutMs: number;
+  private readonly _operationTimeoutMs: number;
 
   /** Optional requested dimensions to pass through to the embedding provider (OpenAI-compatible). */
   private readonly _requestDimensions?: number;
@@ -578,6 +594,7 @@ export class Embedder {
       ? Math.floor(config.clientTimeoutMs!)
       : DEFAULT_EMBED_CLIENT_TIMEOUT_MS;
     this._clientTimeoutMs = clientTimeoutMs;
+    this._operationTimeoutMs = resolveEmbeddingOperationTimeoutMs(config.clientTimeoutMs);
 
     // Warn if configured fields will be silently ignored by this provider profile
     if (config.normalized !== undefined && !this._capabilities.normalized) {
@@ -944,7 +961,7 @@ export class Embedder {
   /** Wrap a single embedding operation with a global timeout via AbortSignal. */
   private withTimeout<T>(promiseFactory: (signal: AbortSignal) => Promise<T>, _label: string, externalSignal?: AbortSignal): Promise<T> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), this._operationTimeoutMs);
 
     // If caller passes an external signal, merge it with the internal timeout controller.
     // Either signal aborting will cancel the promise.
@@ -1000,8 +1017,8 @@ export class Embedder {
   }
 
   // Note: embedBatchQuery/embedBatchPassage are NOT wrapped with withTimeout because
-  // they handle multiple texts in a single API call. The timeout would fire after
-  // EMBED_TIMEOUT_MS regardless of how many texts succeed. Individual text embedding
+  // they handle multiple texts in a single API call. A single-operation wrapper would
+  // fire regardless of how many texts succeed. Individual text embedding
   // within the batch is protected by the SDK's own timeout handling.
   async embedBatchQuery(texts: string[], signal?: AbortSignal): Promise<number[][]> {
     return this.embedMany(texts.map((text) => this.wrapQueryText(text)), this._taskQuery, signal);

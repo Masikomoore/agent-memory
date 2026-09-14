@@ -110,6 +110,7 @@ Authorization: Bearer <MEMORY_SERVER_TOKEN>
 | `MEMORY_EMBEDDING_API_KEY` | — | Embedding provider key |
 | `MEMORY_EMBEDDING_BASE_URL` | OpenAI default | OpenAI-compatible embedding endpoint |
 | `MEMORY_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
+| `MEMORY_EMBEDDING_TIMEOUT_MS` | provider default | Embedding request/operation timeout; increase for CPU-only local models |
 | `MEMORY_LLM_API_KEY` | embedding key | SmartExtractor LLM key |
 | `MEMORY_LLM_BASE_URL` | embedding base URL | SmartExtractor LLM endpoint |
 | `MEMORY_LLM_MODEL` | `openai/gpt-oss-120b` | SmartExtractor LLM model |

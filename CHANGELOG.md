@@ -22,6 +22,7 @@ All notable public Agent Memory changes will be recorded here.
 - Added a production Dockerfile.
 - Added self-contained Docker Compose deployment with LanceDB persistence and local Ollama models.
 - Made model bootstrap deterministic across Docker Compose/Coolify by running embedding and extraction-model pulls as separate direct Ollama jobs instead of shell-composed commands.
+- Fixed the single-embedding operation guard so an explicitly configured provider timeout (for example 60s on CPU-only Ollama) is not cut off by the historical 10s outer timeout.
 - Added Coolify deployment guidance.
 
 ### Project launch

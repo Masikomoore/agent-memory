@@ -4,7 +4,7 @@ import http from "node:http";
 import jitiFactory from "jiti";
 
 const jiti = jitiFactory(import.meta.url, { interopDefault: true });
-const { Embedder } = jiti("../src/embedder.ts");
+const { Embedder, resolveEmbeddingOperationTimeoutMs } = jiti("../src/embedder.ts");
 const { smartChunk } = jiti("../src/chunker.ts");
 
 function generateCJKText(charCount) {
@@ -12,6 +12,14 @@ function generateCJKText(charCount) {
   let text = "";
   for (let i = 0; i < charCount; i++) text += chars[i % chars.length];
   return text;
+}
+
+function testConfiguredEmbeddingTimeoutCanExtendOperationGuard() {
+  console.log("Test 0: configured embedding timeout can extend the single-operation guard");
+  assert.equal(resolveEmbeddingOperationTimeoutMs(undefined), 10_000);
+  assert.equal(resolveEmbeddingOperationTimeoutMs(5_000), 10_000);
+  assert.equal(resolveEmbeddingOperationTimeoutMs(60_000), 60_000);
+  console.log("  PASSED\n");
 }
 
 function createJsonServer(handler) {
@@ -364,6 +372,7 @@ async function testOllamaAbortWithNativeFetch() {
 
 async function run() {
   console.log("Running regression tests for PR #238...\n");
+  testConfiguredEmbeddingTimeoutCanExtendOperationGuard();
   await testSingleChunkFallbackTerminates();
   await testDepthLimitTermination();
   await testCjkAwareChunkSizing();
