@@ -4,7 +4,7 @@ Agent Memory can be managed from Coolify as a Docker Compose application/service
 
 ## Recommended source
 
-Use this Git repository as the source and deploy the root `compose.yaml`. The repository builds the Memory Server from `Dockerfile` and runs Ollama as a companion service.
+Use this Git repository as the source and deploy the root `docker-compose.yaml`. The repository builds the Memory Server from `Dockerfile` and runs Ollama as a companion service.
 
 ## Required configuration
 
