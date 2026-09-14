@@ -27,8 +27,8 @@ services:
       MEMORY_EMBEDDING_DIMENSIONS: "768"
       MEMORY_EMBEDDING_TIMEOUT_MS: "60000"
       MEMORY_LLM_BASE_URL: http://ollama:11434/v1
-      MEMORY_LLM_MODEL: qwen2.5:3b
-      MEMORY_LLM_TIMEOUT_MS: "120000"
+      MEMORY_LLM_MODEL: "${MEMORY_LLM_MODEL:-qwen2.5:1.5b}"
+      MEMORY_LLM_TIMEOUT_MS: "${MEMORY_LLM_TIMEOUT_MS:-180000}"
     volumes:
       - agent-memory-data:/app/data
     healthcheck:
@@ -73,7 +73,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/ollama"]
-    command: ["pull", "qwen2.5:3b"]
+    command: ["pull", "${MEMORY_LLM_MODEL:-qwen2.5:1.5b}"]
 
 volumes:
   agent-memory-data:

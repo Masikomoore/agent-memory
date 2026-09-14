@@ -81,7 +81,7 @@ curl http://127.0.0.1:7337/health
 
 - Agent Memory Server
 - `nomic-embed-text` Embedding
-- `qwen2.5:3b` SmartExtractor
+- `qwen2.5:1.5b` SmartExtractor（CPU 友好默认值，可通过 `MEMORY_LLM_MODEL` 覆盖）
 - LanceDB 持久卷
 - Ollama 模型持久卷
 

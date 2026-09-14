@@ -24,6 +24,12 @@ MEMORY_SERVER_ALLOWED_ORIGINS=<same-hosts-as-needed>
 
 Prefer a VPN/private network or TLS reverse proxy. Do not expose the raw service unauthenticated.
 
+For CPU-only hosts, the Compose default uses `qwen2.5:1.5b` for SmartExtractor
+with a 180-second LLM timeout. Faster CPU/GPU hosts can set
+`MEMORY_LLM_MODEL=qwen2.5:3b` (or another Ollama model) and tune
+`MEMORY_LLM_TIMEOUT_MS` without editing the Compose file. The model bootstrap
+job pulls the same configured model before the Memory Server starts.
+
 ## Persistent data
 
 The compose stack declares two persistent volumes:
