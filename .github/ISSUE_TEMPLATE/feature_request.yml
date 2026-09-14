@@ -1,0 +1,42 @@
+name: ✨ Feature request
+description: Propose an improvement to the shared Agent Memory platform
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What agent-memory workflow is difficult or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed direction
+      description: Describe the behavior or interface you would like.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent integration
+        - Memory quality
+        - Server / API
+        - Authentication / multi-user
+        - Storage / backup
+        - Operations / observability
+        - Web UI
+        - Deployment
+        - Documentation
+        - Other
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Would you like to work on this?
+      description: Optional. Mention constraints or where you would like maintainer guidance.

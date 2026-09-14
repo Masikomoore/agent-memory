@@ -1,0 +1,69 @@
+services:
+  memory-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    ports:
+      - "${MEMORY_SERVER_BIND_ADDRESS:-127.0.0.1}:7337:7337"
+    environment:
+      NODE_ENV: production
+      MEMORY_SERVER_HOST: 0.0.0.0
+      MEMORY_SERVER_PORT: 7337
+      MEMORY_SERVER_DB_PATH: /app/data/memory-server
+      MEMORY_SERVER_TOKEN: "${MEMORY_SERVER_TOKEN:?set MEMORY_SERVER_TOKEN in .env}"
+      MEMORY_SERVER_ALLOWED_HOSTS: "${MEMORY_SERVER_ALLOWED_HOSTS:-localhost,127.0.0.1,memory-server}"
+      MEMORY_SERVER_ALLOWED_ORIGINS: "${MEMORY_SERVER_ALLOWED_ORIGINS:-localhost,127.0.0.1,memory-server}"
+      MEMORY_SERVER_DEFAULT_AGENT: main
+      MEMORY_SERVER_DEFAULT_WRITE_SCOPE: global
+      MEMORY_CAPTURE_ENABLED: "true"
+      MEMORY_EMBEDDING_BASE_URL: http://ollama:11434/v1
+      MEMORY_EMBEDDING_MODEL: nomic-embed-text
+      MEMORY_EMBEDDING_DIMENSIONS: "768"
+      MEMORY_EMBEDDING_TIMEOUT_MS: "60000"
+      MEMORY_LLM_BASE_URL: http://ollama:11434/v1
+      MEMORY_LLM_MODEL: qwen2.5:3b
+      MEMORY_LLM_TIMEOUT_MS: "120000"
+    volumes:
+      - agent-memory-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7337/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  ollama:
+    image: ollama/ollama:0.34.0
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 10m
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "OLLAMA_HOST=http://127.0.0.1:11434 ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ollama-init:
+    image: ollama/ollama:0.34.0
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      ollama pull nomic-embed-text &&
+      ollama pull qwen2.5:3b
+
+volumes:
+  agent-memory-data:
+  ollama-models:

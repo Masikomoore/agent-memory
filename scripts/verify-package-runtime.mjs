@@ -1,0 +1,83 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, "..");
+
+function fail(message) {
+  throw new Error(`package runtime verification failed: ${message}`);
+}
+
+function readJson(relativePath) {
+  return JSON.parse(readFileSync(path.join(repoRoot, relativePath), "utf8"));
+}
+
+function verifyDistFreshness() {
+  const result = spawnSync("git", ["status", "--porcelain", "--untracked-files=all", "--", "dist"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    fail(`could not verify dist freshness with git status: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+  }
+  const changedDistOutput = result.stdout.trim();
+  if (changedDistOutput.length === 0) return;
+  fail(`dist/ has uncommitted or untracked output after build:\n${changedDistOutput}\nRun npm run build and commit the generated dist output`);
+}
+
+function normalizeRuntimePath(value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    fail(`invalid runtime path ${JSON.stringify(value)}`);
+  }
+  return value.replace(/^\.\//, "");
+}
+
+function verifyCompiledRuntime(relativePath, sourceLabel) {
+  const normalized = normalizeRuntimePath(relativePath);
+  if (!/^dist\/.+\.m?js$/i.test(normalized)) {
+    fail(`${sourceLabel} must point at compiled JavaScript under dist/, got ${relativePath}`);
+  }
+
+  const absolutePath = path.join(repoRoot, normalized);
+  if (!existsSync(absolutePath)) {
+    fail(`${sourceLabel} points to missing file ${relativePath}; run npm run build before packaging`);
+  }
+  if (!statSync(absolutePath).isFile()) {
+    fail(`${sourceLabel} does not point to a file: ${relativePath}`);
+  }
+}
+
+const pkg = readJson("package.json");
+
+verifyCompiledRuntime(pkg.main, "package.json main");
+
+const memoryServerCommand = pkg.scripts?.["memory-server"];
+if (typeof memoryServerCommand !== "string") {
+  fail('package.json scripts must define "memory-server"');
+}
+const memoryServerMatch = /^node\s+([^\s]+)$/.exec(memoryServerCommand.trim());
+if (!memoryServerMatch) {
+  fail(`package.json memory-server script must be a direct node dist entry, got ${JSON.stringify(memoryServerCommand)}`);
+}
+verifyCompiledRuntime(memoryServerMatch[1], "package.json memory-server script");
+
+const extensions = pkg.openclaw?.extensions;
+if (!Array.isArray(extensions) || extensions.length === 0) {
+  fail("package.json openclaw.extensions must list at least one runtime entry");
+}
+
+for (const extension of extensions) {
+  verifyCompiledRuntime(extension, "package.json openclaw.extensions entry");
+}
+
+const files = Array.isArray(pkg.files) ? pkg.files : [];
+if (!files.includes("dist/**/*")) {
+  fail('package.json files must include "dist/**/*" so compiled runtime output is published');
+}
+
+verifyDistFreshness();
+
+console.log("Package runtime entries point to compiled fresh dist output");

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.zip
+.memory-lancedb-pro/
+progress.md
+findings.md
+task_plan.md

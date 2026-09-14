@@ -1,0 +1,2683 @@
+/**
+ * CLI Commands for Memory Management
+ */
+
+import type { Command } from "commander";
+import { readFileSync, type Dirent } from "node:fs";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import path from "node:path";
+import * as readline from "node:readline";
+import JSON5 from "json5";
+import { loadLanceDB, type MemoryEntry, type MemoryStore } from "./src/store.js";
+import { createRetriever, type MemoryRetriever } from "./src/retriever.js";
+import type { MemoryScopeManager } from "./src/scopes.js";
+import type { MemoryMigrator } from "./src/migrate.js";
+import { createMemoryUpgrader, isCurrentReflectionMemory } from "./src/memory-upgrader.js";
+import type { LlmClient } from "./src/llm-client.js";
+import type { MdMirrorWriter } from "./src/tools.js";
+import { runConsolidate, formatConsolidateCostPreview, formatConsolidatePlanForDisplay, pluralCount, DEFAULT_SCAN_LIMIT, loadConsolidateSettledLedger, saveConsolidateSettledLedger } from "./src/consolidate.js";
+import {
+  getDefaultOauthModelForProvider,
+  getOAuthProviderLabel,
+  isOauthModelSupported,
+  listOAuthProviders,
+  normalizeOauthModel,
+  normalizeOAuthProviderId,
+  performOAuthLogin,
+} from "./src/llm-oauth.js";
+
+// ============================================================================
+// Types
+// ============================================================================
+
+interface CLIContext {
+  store: MemoryStore;
+  retriever: MemoryRetriever;
+  scopeManager: MemoryScopeManager;
+  migrator: MemoryMigrator;
+  embedder?: import("./src/embedder.js").Embedder;
+  llmClient?: LlmClient;
+  pluginId?: string;
+  pluginConfig?: Record<string, unknown>;
+  // Called synchronously after a delete or delete-bulk command actually removes
+  // memories, so the host plugin can invalidate any in-process read caches (e.g.
+  // reflection slice caches) keyed on the affected scope(s) before they go stale.
+  onMemoriesDeleted?: (info: { scopeFilter?: string[] }) => void;
+  oauthTestHooks?: {
+    openUrl?: (url: string) => void | Promise<void>;
+    authorizeUrl?: (url: string) => void | Promise<void>;
+    chooseProvider?: (
+      providers: Array<{ id: string; label: string; defaultModel: string }>,
+      currentProviderId: string,
+    ) => string | Promise<string>;
+  };
+  mdMirror?: MdMirrorWriter | null;
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+function getPluginVersion(): string {
+  try {
+    const pkgUrl = new URL("./package.json", import.meta.url);
+    const pkg = JSON.parse(readFileSync(pkgUrl, "utf8")) as { version?: string };
+    return pkg.version || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  const n = Number.isFinite(value) ? value : min;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+
+// A running gateway process holds its own long-lived LanceDB table handle
+// (separate from this CLI's own connection). With a non-zero
+// readConsistencyIntervalSeconds, its next read may still observe the
+// pre-delete state for up to that many seconds. Strong consistency (0,
+// the default) or an unset interval need no hint.
+function printReadConsistencyHint(store: { readConsistencyInterval?: number }): void {
+  const interval = store.readConsistencyInterval;
+  if (typeof interval === "number" && interval > 0) {
+    console.log(
+      `Note: a running gateway process may take up to ${interval}s to observe this change (readConsistencyIntervalSeconds).`,
+    );
+  }
+}
+
+function resolveOpenClawConfigPath(explicit?: string): string {
+  const openclawHome = resolveOpenClawHome();
+  if (explicit && explicit.trim()) {
+    return path.resolve(explicit.trim());
+  }
+
+  const fromEnv = process.env.OPENCLAW_CONFIG_PATH?.trim();
+  if (fromEnv) {
+    return path.resolve(fromEnv);
+  }
+
+  return path.join(openclawHome, "openclaw.json");
+}
+
+function resolveOpenClawHome(): string {
+  return process.env.OPENCLAW_HOME?.trim()
+    ? path.resolve(process.env.OPENCLAW_HOME.trim())
+    : path.join(homedir(), ".openclaw");
+}
+
+function resolveDefaultOauthPath(): string {
+  return path.join(resolveOpenClawHome(), ".memory-lancedb-pro", "oauth.json");
+}
+
+function resolveLoginOauthPath(rawPath: unknown): string {
+  const trimmed = typeof rawPath === "string" ? rawPath.trim() : "";
+  const candidate = trimmed || resolveDefaultOauthPath();
+  return path.resolve(candidate);
+}
+
+function resolveConfiguredOauthPath(configPath: string, rawPath: unknown): string {
+  const trimmed = typeof rawPath === "string" ? rawPath.trim() : "";
+  if (!trimmed) {
+    return resolveDefaultOauthPath();
+  }
+  if (path.isAbsolute(trimmed)) {
+    return trimmed;
+  }
+  return path.resolve(path.dirname(configPath), trimmed);
+}
+
+type RestorableApiKeyLlmConfig = {
+  auth?: "api-key";
+  apiKey?: string;
+  model?: string;
+  baseURL?: string;
+  timeoutMs?: number;
+};
+
+type OAuthLlmBackup = {
+  version: 1;
+  hadLlmConfig: boolean;
+  llm: RestorableApiKeyLlmConfig;
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOauthLlmConfig(value: unknown): boolean {
+  return isPlainObject(value) && value.auth === "oauth";
+}
+
+function extractRestorableApiKeyLlmConfig(value: unknown): RestorableApiKeyLlmConfig {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  const result: RestorableApiKeyLlmConfig = {};
+  if (value.auth === "api-key") {
+    result.auth = "api-key";
+  }
+  if (typeof value.apiKey === "string") {
+    result.apiKey = value.apiKey;
+  }
+  if (typeof value.model === "string") {
+    result.model = value.model;
+  }
+  if (typeof value.baseURL === "string") {
+    result.baseURL = value.baseURL;
+  }
+  if (typeof value.timeoutMs === "number" && Number.isFinite(value.timeoutMs) && value.timeoutMs > 0) {
+    result.timeoutMs = Math.trunc(value.timeoutMs);
+  }
+  return result;
+}
+
+function extractOauthSafeLlmConfig(value: unknown): RestorableApiKeyLlmConfig {
+  if (!isPlainObject(value)) {
+    return {};
+  }
+
+  const result: RestorableApiKeyLlmConfig = {};
+  if (typeof value.baseURL === "string") {
+    result.baseURL = value.baseURL;
+  }
+  if (typeof value.timeoutMs === "number" && Number.isFinite(value.timeoutMs) && value.timeoutMs > 0) {
+    result.timeoutMs = Math.trunc(value.timeoutMs);
+  }
+  return result;
+}
+
+function hasRestorableApiKeyLlmConfig(value: RestorableApiKeyLlmConfig): boolean {
+  return Object.keys(value).length > 0;
+}
+
+function buildLogoutFallbackLlmConfig(value: unknown): RestorableApiKeyLlmConfig {
+  if (isOauthLlmConfig(value)) {
+    return extractOauthSafeLlmConfig(value);
+  }
+  return extractRestorableApiKeyLlmConfig(value);
+}
+
+function getOauthBackupPath(oauthPath: string): string {
+  const parsed = path.parse(oauthPath);
+  const fileName = parsed.ext
+    ? `${parsed.name}.llm-backup${parsed.ext}`
+    : `${parsed.base}.llm-backup.json`;
+  return path.join(parsed.dir, fileName);
+}
+
+async function saveOauthLlmBackup(oauthPath: string, llm: unknown, hadLlmConfig: boolean): Promise<void> {
+  const backupPath = getOauthBackupPath(oauthPath);
+  const payload: OAuthLlmBackup = {
+    version: 1,
+    hadLlmConfig,
+    llm: extractRestorableApiKeyLlmConfig(llm),
+  };
+  await mkdir(path.dirname(backupPath), { recursive: true });
+  await writeFile(backupPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
+}
+
+async function loadOauthLlmBackup(oauthPath: string): Promise<OAuthLlmBackup | null> {
+  const backupPath = getOauthBackupPath(oauthPath);
+  try {
+    const raw = await readFile(backupPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!isPlainObject(parsed) || parsed.version !== 1 || typeof parsed.hadLlmConfig !== "boolean") {
+      return null;
+    }
+    return {
+      version: 1,
+      hadLlmConfig: parsed.hadLlmConfig,
+      llm: extractRestorableApiKeyLlmConfig(parsed.llm),
+    };
+  } catch {
+    return null;
+  }
+}
+
+const OAUTH_PROVIDER_CHOICES = listOAuthProviders()
+  .map((provider) => `${provider.id} (${provider.label})`)
+  .join(", ");
+
+function pickOauthProvider(currentProvider: string | undefined, overrideProvider: string | undefined): {
+  providerId: string;
+  source: "override" | "config" | "default";
+} {
+  if (overrideProvider && overrideProvider.trim()) {
+    return { providerId: normalizeOAuthProviderId(overrideProvider), source: "override" };
+  }
+
+  if (currentProvider && currentProvider.trim()) {
+    try {
+      return { providerId: normalizeOAuthProviderId(currentProvider), source: "config" };
+    } catch {
+      // Fall back to the default provider when the saved config is stale or invalid.
+    }
+  }
+
+  return { providerId: normalizeOAuthProviderId(), source: "default" };
+}
+
+async function promptOauthProviderSelection(
+  currentProviderId: string,
+  testHook?: CLIContext["oauthTestHooks"]["chooseProvider"],
+): Promise<{ providerId: string; source: "prompt" | "default" }> {
+  const providers = listOAuthProviders();
+  if (providers.length === 0) {
+    throw new Error("No OAuth providers are available.");
+  }
+
+  if (testHook) {
+    const selected = await testHook(providers, currentProviderId);
+    return { providerId: normalizeOAuthProviderId(selected), source: "prompt" };
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return { providerId: currentProviderId, source: "default" };
+  }
+
+  let selectedIndex = providers.findIndex((provider) => provider.id === currentProviderId);
+  if (selectedIndex < 0) selectedIndex = 0;
+
+  readline.emitKeypressEvents(process.stdin);
+  const canSetRawMode = typeof process.stdin.setRawMode === "function";
+  const previousRawMode = canSetRawMode ? !!process.stdin.isRaw : false;
+  const menuLines = 2 + providers.length;
+  let hasRendered = false;
+
+  const render = () => {
+    if (hasRendered) {
+      readline.moveCursor(process.stdout, 0, -menuLines);
+      readline.cursorTo(process.stdout, 0);
+      readline.clearScreenDown(process.stdout);
+    } else {
+      process.stdout.write("\n");
+      hasRendered = true;
+    }
+
+    process.stdout.write("Select OAuth provider\n");
+    process.stdout.write("Use arrow keys and Enter.\n");
+    providers.forEach((provider, index) => {
+      const marker = index === selectedIndex ? ">" : " ";
+      process.stdout.write(
+        `${marker} ${provider.label} (${provider.id}) [default model: ${provider.defaultModel}]\n`,
+      );
+    });
+  };
+
+  return await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      process.stdin.off("keypress", onKeypress);
+      if (canSetRawMode) {
+        process.stdin.setRawMode(previousRawMode);
+      }
+      process.stdin.pause();
+      process.stdout.write("\n");
+    };
+
+    const onKeypress = (_str: string, key: { name?: string; ctrl?: boolean }) => {
+      if (key.ctrl && key.name === "c") {
+        cleanup();
+        reject(new Error("OAuth login cancelled while selecting a provider."));
+        return;
+      }
+
+      if (key.name === "escape") {
+        cleanup();
+        reject(new Error("OAuth login cancelled while selecting a provider."));
+        return;
+      }
+
+      if (key.name === "up" || key.name === "left") {
+        selectedIndex = (selectedIndex - 1 + providers.length) % providers.length;
+        render();
+        return;
+      }
+
+      if (key.name === "down" || key.name === "right") {
+        selectedIndex = (selectedIndex + 1) % providers.length;
+        render();
+        return;
+      }
+
+      if (key.name === "return" || key.name === "enter") {
+        const provider = providers[selectedIndex];
+        cleanup();
+        resolve({ providerId: provider.id, source: "prompt" });
+      }
+    };
+
+    render();
+    process.stdin.on("keypress", onKeypress);
+    process.stdin.resume();
+    if (canSetRawMode) {
+      process.stdin.setRawMode(true);
+    }
+  });
+}
+
+async function resolveOauthProviderSelection(
+  currentProvider: string | undefined,
+  overrideProvider: string | undefined,
+  chooseProviderHook?: CLIContext["oauthTestHooks"]["chooseProvider"],
+): Promise<{ providerId: string; source: "override" | "config" | "default" | "prompt" }> {
+  if (overrideProvider && overrideProvider.trim()) {
+    return pickOauthProvider(currentProvider, overrideProvider);
+  }
+
+  const initial = pickOauthProvider(currentProvider, undefined);
+  return await promptOauthProviderSelection(initial.providerId, chooseProviderHook);
+}
+
+function pickOauthModel(
+  providerId: string,
+  currentModel: string | undefined,
+  overrideModel: string | undefined,
+): { model: string; source: "override" | "config" | "default" } {
+  if (overrideModel && overrideModel.trim()) {
+    if (!isOauthModelSupported(providerId, overrideModel)) {
+      throw new Error(
+        `Model "${overrideModel}" is not supported for OAuth provider ${providerId}. Use a compatible model such as ${getDefaultOauthModelForProvider(providerId)}.`,
+      );
+    }
+    return { model: overrideModel.trim(), source: "override" };
+  }
+
+  if (isOauthModelSupported(providerId, currentModel)) {
+    return { model: currentModel!.trim(), source: "config" };
+  }
+
+  return { model: getDefaultOauthModelForProvider(providerId), source: "default" };
+}
+
+async function loadOpenClawConfig(configPath: string): Promise<Record<string, any>> {
+  const raw = await readFile(configPath, "utf8");
+  const parsed = JSON5.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Invalid OpenClaw config at ${configPath}: expected object`);
+  }
+  return parsed as Record<string, any>;
+}
+
+function ensurePluginConfigRoot(config: Record<string, any>, pluginId: string): Record<string, any> {
+  config.plugins ||= {};
+  config.plugins.entries ||= {};
+  config.plugins.entries[pluginId] ||= { enabled: true, config: {} };
+  const entry = config.plugins.entries[pluginId];
+  entry.enabled = true;
+  entry.config ||= {};
+  return entry.config as Record<string, any>;
+}
+
+async function saveOpenClawConfig(configPath: string, config: Record<string, any>): Promise<void> {
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+}
+
+function formatMemory(memory: any, index?: number): string {
+  const prefix = index !== undefined ? `${index + 1}. ` : "";
+  const id = memory?.id ? String(memory.id) : "unknown";
+  const date = new Date(memory.timestamp || memory.createdAt || Date.now()).toISOString().split('T')[0];
+  const fullText = String(memory.text || "");
+  const text = fullText.slice(0, 100) + (fullText.length > 100 ? "..." : "");
+  return `${prefix}[${id}] [${memory.category}:${memory.scope}] ${text} (${date})`;
+}
+
+const OBSIDIAN_CATEGORY_DIRS: Record<string, string> = {
+  preference: "00-Preferences",
+  fact: "01-Facts",
+  decision: "02-Decisions",
+  entity: "03-People",
+  reflection: "04-Reflections",
+  other: "05-Other",
+};
+
+function safeObsidianSlug(value: string, fallback = "memory"): string {
+  const slug = value
+    .normalize("NFKD")
+    .replace(/[\\/:*?"<>|#^[\]]+/g, " ")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80)
+    .toLowerCase();
+  return slug || fallback;
+}
+
+function yamlScalar(value: unknown): string {
+  const text = String(value ?? "");
+  return JSON.stringify(text);
+}
+
+function memoryDate(memory: MemoryEntry): string {
+  const timestamp = Number(memory.timestamp);
+  const date = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp) : new Date();
+  return date.toISOString().split("T")[0];
+}
+
+function memoryTitle(memory: MemoryEntry): string {
+  const firstLine = String(memory.text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (firstLine) {
+    return firstLine.slice(0, 80);
+  }
+  return `Memory ${memory.id}`;
+}
+
+function formatObsidianMemory(memory: MemoryEntry): string {
+  const created = memoryDate(memory);
+  const title = memoryTitle(memory);
+  const metadata = (() => {
+    try {
+      return memory.metadata ? JSON.parse(memory.metadata) : {};
+    } catch {
+      return {};
+    }
+  })();
+  const tags = Array.isArray(metadata?.tags)
+    ? metadata.tags.filter((tag: unknown) => typeof tag === "string")
+    : [];
+
+  const frontmatter = [
+    "---",
+    `id: ${yamlScalar(memory.id)}`,
+    `category: ${yamlScalar(memory.category)}`,
+    `scope: ${yamlScalar(memory.scope || "global")}`,
+    `importance: ${Number.isFinite(Number(memory.importance)) ? Number(memory.importance) : 0}`,
+    `created: ${yamlScalar(created)}`,
+    `source: ${yamlScalar("memory-lancedb-pro")}`,
+    `tags: [${tags.map(yamlScalar).join(", ")}]`,
+    "---",
+    "",
+  ];
+
+  return `${frontmatter.join("\n")}# ${title}\n\n${String(memory.text || "").trim()}\n`;
+}
+
+function formatJson(obj: any): string {
+  return JSON.stringify(obj, null, 2);
+}
+
+function writeStdout(text: string): void {
+  process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+function writeJson(obj: any): void {
+  writeStdout(formatJson(obj));
+}
+
+function formatRetrievalDiagnosticsLines(diagnostics: {
+  originalQuery: string;
+  bm25Query: string | null;
+  queryExpanded: boolean;
+  vectorResultCount: number;
+  bm25ResultCount: number;
+  fusedResultCount: number;
+  finalResultCount: number;
+  stageCounts: {
+    afterMinScore: number;
+    rerankInput: number;
+    afterRerank: number;
+    afterHardMinScore: number;
+    afterNoiseFilter: number;
+    afterDiversity: number;
+  };
+  dropSummary: Array<{ stage: string; dropped: number; before: number; after: number }>;
+  failureStage?: string;
+  errorMessage?: string;
+}): string[] {
+  const topDrops =
+    diagnostics.dropSummary.length > 0
+      ? diagnostics.dropSummary
+          .slice(0, 3)
+          .map(
+            (drop) => `${drop.stage} -${drop.dropped} (${drop.before}->${drop.after})`,
+          )
+          .join(", ")
+      : "none";
+
+  const lines = [
+    "Retrieval diagnostics:",
+    `  • Original query: ${diagnostics.originalQuery}`,
+    `  • BM25 query: ${diagnostics.bm25Query ?? "(disabled)"}`,
+    `  • Query expanded: ${diagnostics.queryExpanded ? "Yes" : "No"}`,
+    `  • Counts: vector=${diagnostics.vectorResultCount}, bm25=${diagnostics.bm25ResultCount}, fused=${diagnostics.fusedResultCount}, final=${diagnostics.finalResultCount}`,
+    `  • Stages: min=${diagnostics.stageCounts.afterMinScore}, rerankIn=${diagnostics.stageCounts.rerankInput}, rerank=${diagnostics.stageCounts.afterRerank}, hard=${diagnostics.stageCounts.afterHardMinScore}, noise=${diagnostics.stageCounts.afterNoiseFilter}, diversity=${diagnostics.stageCounts.afterDiversity}`,
+    `  • Drops: ${topDrops}`,
+  ];
+
+  if (diagnostics.failureStage) {
+    lines.push(`  • Failure stage: ${diagnostics.failureStage}`);
+  }
+  if (diagnostics.errorMessage) {
+    lines.push(`  • Error: ${diagnostics.errorMessage}`);
+  }
+
+  return lines;
+}
+
+function buildSearchErrorPayload(
+  error: unknown,
+  diagnostics: unknown,
+  includeDiagnostics: boolean,
+): Record<string, unknown> {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    error: {
+      code: "search_failed",
+      message,
+    },
+    ...(includeDiagnostics && diagnostics ? { diagnostics } : {}),
+  };
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================================
+// CLI Command Implementations
+// ============================================================================
+
+export async function runImportMarkdown(
+  ctx: { embedder?: import("./src/embedder.js").Embedder; store: MemoryStore },
+  workspaceGlob: string | undefined,
+  options: {
+    dryRun?: boolean;
+    scope?: string;
+    openclawHome?: string;
+    dedup?: boolean;
+    minTextLength?: string;
+    importance?: string;
+  }
+  ): Promise<{
+    imported: number;
+    skipped: number;
+    foundFiles: number;
+    entriesProcessed: number;
+    skippedShort: number;
+    skippedDedup: number;
+    errorCount: number;
+    elapsedMs: number;
+    embedBatches: number;
+    bulkStoreCalls: number;
+  }> {
+  const startMs = Date.now();
+  const openclawHome = options.openclawHome
+    ? path.resolve(options.openclawHome)
+    : path.join(homedir(), ".openclaw");
+
+  const workspaceDir = path.join(openclawHome, "workspace");
+  let imported = 0;
+  let skipped = 0;
+  let foundFiles = 0;
+  let entriesProcessed = 0;
+  let skippedShort = 0;
+  let skippedDedup = 0;
+  let errorCount = 0;
+  let embedBatches = 0;
+  let bulkStoreCalls = 0;
+
+  if (!ctx.embedder) {
+    // [FIXED P1] Throw instead of process.exit(1) so CLI handler can catch it
+    throw new Error(
+      "import-markdown requires an embedder. Use via plugin CLI or ensure embedder is configured.",
+    );
+  }
+
+  // Infer workspace scope from openclaw.json agents list
+  // (flat memory/ files have no per-file metadata, so we derive scope from config)
+  let workspaceScope = ""; // empty = no scope override for nested workspaces
+  try {
+    const configPath = path.join(openclawHome, "openclaw.json");
+    const configContent = await readFile(configPath, "utf8");
+    const config = JSON5.parse(configContent);
+    const agentsList: Array<{ id?: string; workspace?: string }> = config?.agents?.list ?? [];
+    const matchedAgents = agentsList.filter((a) => {
+      if (!a.workspace) return false;
+      const normalized = path.normalize(a.workspace);
+      return normalized.startsWith(workspaceDir + path.sep);
+    });
+    if (matchedAgents.length === 1 && matchedAgents[0]?.id) {
+      workspaceScope = matchedAgents[0].id;
+    }
+  } catch { /* use default */ }
+
+  const fsPromises = await import("node:fs/promises");
+
+  // Scan workspace directories
+  let workspaceEntries: Dirent[];
+  try {
+    workspaceEntries = await fsPromises.readdir(workspaceDir, { withFileTypes: true });
+  } catch {
+    // [FIXED P1] Throw instead of process.exit(1) so CLI handler can catch it
+    throw new Error(`Failed to read workspace directory: ${workspaceDir}`);
+  }
+
+  // Collect all markdown files to scan
+  const mdFiles: Array<{ filePath: string; scope: string }> = [];
+
+  for (const entry of workspaceEntries) {
+    if (!entry.isDirectory()) continue;
+    if (workspaceGlob && !entry.name.includes(workspaceGlob)) continue;
+
+    const workspacePath = path.join(workspaceDir, entry.name);
+
+    // MEMORY.md
+    const memoryMd = path.join(workspacePath, "MEMORY.md");
+    try {
+      await fsPromises.stat(memoryMd);
+      mdFiles.push({ filePath: memoryMd, scope: entry.name });
+    } catch { /* not found */ }
+
+    // memory/ directory
+    const memoryDir = path.join(workspacePath, "memory");
+    try {
+      const stats = await fsPromises.stat(memoryDir);
+      if (stats.isDirectory()) {
+        const files = await fsPromises.readdir(memoryDir, { withFileTypes: true });
+        for (const f of files) {
+          if (f.isFile() && f.name.endsWith(".md") && /^\d{4}-\d{2}-\d{2}/.test(f.name)) {
+            mdFiles.push({ filePath: path.join(memoryDir, f.name), scope: entry.name });
+          }
+        }
+      }
+    } catch { /* not found */ }
+  }
+
+  // Also scan nested agent workspaces under workspace/agents/<id>/.
+  // This handles the structure used by session-recovery and other OpenClaw
+  // components: workspace/agents/<id>/MEMORY.md and workspace/agents/<id>/memory/.
+  // We scan one additional level deeper than the top-level workspace scan.
+  async function scanAgentMd(
+    agentPath: string,
+    agentId: string,
+    mdFiles: Array<{ filePath: string; scope: string }>,
+    fsP: typeof import("node:fs/promises")
+  ): Promise<void> {
+    // workspace/agents/<id>/MEMORY.md
+    const agentMemoryMd = path.join(agentPath, "MEMORY.md");
+    try {
+      await fsP.stat(agentMemoryMd);
+      mdFiles.push({ filePath: agentMemoryMd, scope: agentId });
+    } catch { /* not found */ }
+
+    // workspace/agents/<id>/memory/ date files
+    const agentMemoryDir = path.join(agentPath, "memory");
+    try {
+      const stats = await fsP.stat(agentMemoryDir);
+      if (stats.isDirectory()) {
+        const files = await fsP.readdir(agentMemoryDir, { withFileTypes: true });
+        for (const f of files) {
+          if (f.isFile() && f.name.endsWith(".md") && /^\d{4}-\d{2}-\d{2}/.test(f.name)) {
+            mdFiles.push({ filePath: path.join(agentMemoryDir, f.name), scope: agentId });
+          }
+        }
+      }
+    } catch { /* not found */ }
+  }
+
+  const agentsDir = path.join(workspaceDir, "agents");
+  try {
+    const agentEntries = await fsPromises.readdir(agentsDir, { withFileTypes: true });
+    if (workspaceGlob) {
+      // 有明確目標：只掃描符合的那一個 agent workspace
+      const matchedAgent = agentEntries.find(e => e.isDirectory() && e.name === workspaceGlob);
+      if (matchedAgent) {
+        const agentPath = path.join(agentsDir, matchedAgent.name);
+        await scanAgentMd(agentPath, matchedAgent.name, mdFiles, fsPromises);
+      }
+    } else {
+      // 無指定：掃描全部 agent workspaces
+      for (const agentEntry of agentEntries) {
+        if (!agentEntry.isDirectory()) continue;
+        const agentPath = path.join(agentsDir, agentEntry.name);
+        await scanAgentMd(agentPath, agentEntry.name, mdFiles, fsPromises);
+      }
+    }
+  } catch { /* no agents/ directory */ }
+
+  // Also scan the flat `workspace/memory/` directory directly under workspace root
+  // (not inside any workspace subdirectory — supports James's actual structure).
+  // This scan runs regardless of whether nested workspace mdFiles were found,
+  // so flat memory is always reachable even when all nested workspaces are empty.
+  // Skip if a specific workspace was requested (workspaceGlob), to avoid importing
+  // root flat memory when the user meant to import only one workspace.
+  if (!workspaceGlob) {
+    const flatMemoryDir = path.join(workspaceDir, "memory");
+    try {
+      const stats = await fsPromises.stat(flatMemoryDir);
+      if (stats.isDirectory()) {
+        const files = await fsPromises.readdir(flatMemoryDir, { withFileTypes: true });
+        for (const f of files) {
+          if (f.isFile() && f.name.endsWith(".md") && /^\d{4}-\d{2}-\d{2}/.test(f.name)) {
+            mdFiles.push({ filePath: path.join(flatMemoryDir, f.name), scope: workspaceScope || "global" });
+          }
+        }
+      }
+    } catch { /* not found */ }
+  }
+
+  const scopesFound = new Set(mdFiles.map((file) => file.scope));
+  console.log(`[scan] found ${mdFiles.length} markdown file(s) across ${scopesFound.size} workspace(s):`);
+  for (const { filePath, scope } of mdFiles) {
+    console.log(`  [scan] [${scope}] ${filePath}`);
+  }
+
+  const printSummary = (): void => {
+    const elapsedMs = Date.now() - startMs;
+    console.log("");
+    console.log("Memory Import Status:");
+    console.log(`• Files found: ${foundFiles}`);
+    console.log(`• Entries processed: ${entriesProcessed}`);
+    console.log(`• Imported: ${options.dryRun ? 0 : imported}`);
+    if (options.dryRun) {
+      console.log(`• Would import: ${imported}`);
+    }
+    console.log(`• Skipped (too short): ${skippedShort}`);
+    console.log(`• Skipped (dedup): ${skippedDedup}`);
+    console.log(`• Errors: ${errorCount}`);
+    console.log(`• Embed batches: ${embedBatches}`);
+    console.log(`• bulkStore calls: ${bulkStoreCalls}`);
+    console.log(`• Elapsed: ${elapsedMs}ms`);
+    if (options.dryRun) {
+      console.log("[DRY-RUN] No entries were actually imported.");
+    }
+  };
+
+  if (mdFiles.length === 0) {
+    printSummary();
+    return {
+      imported: 0,
+      skipped: 0,
+      foundFiles: 0,
+      entriesProcessed: 0,
+      skippedShort: 0,
+      skippedDedup: 0,
+      errorCount: 0,
+      elapsedMs: Date.now() - startMs,
+      embedBatches: 0,
+      bulkStoreCalls: 0,
+    };
+  }
+
+  // NaN-safe parsing with bounds — invalid input falls back to defaults instead of
+  // silently passing NaN (e.g. "--min-text-length abc" would otherwise make every
+  // length check behave unexpectedly).
+  const minTextLength = clampInt(parseInt(options.minTextLength ?? "5", 10), 1, 10000);
+  const importanceDefault = Number.isFinite(parseFloat(options.importance ?? "0.7"))
+    ? Math.max(0, Math.min(1, parseFloat(options.importance ?? "0.7")))
+    : 0.7;
+  const dedupEnabled = !!options.dedup;
+  console.log(`[import] dedup check: ${dedupEnabled ? "enabled" : "disabled"}`);
+  type PendingMarkdownEntry = {
+    text: string;
+    scope: string;
+    sourceScope: string;
+    filePath: string;
+  };
+  type MarkdownImportEntry = Omit<MemoryEntry, "id" | "timestamp">;
+
+  const buildMarkdownImportEntry = (
+    pending: PendingMarkdownEntry,
+    vector: number[],
+  ): MarkdownImportEntry => ({
+    text: pending.text,
+    vector,
+    importance: importanceDefault,
+    category: "other",
+    scope: pending.scope,
+    metadata: JSON.stringify({ importedFrom: pending.filePath, sourceScope: pending.sourceScope }),
+  });
+
+  const importEntriesIndividually = async (
+    entries: MarkdownImportEntry[],
+  ): Promise<{ imported: number; skipped: number }> => {
+    let importedCount = 0;
+    let skippedCount = 0;
+    for (const entry of entries) {
+      try {
+        await ctx.store.store(entry);
+        importedCount++;
+      } catch (err) {
+        console.warn(`  Failed to import: ${String(entry.text).slice(0, 60)}... — ${err}`);
+        errorCount++;
+        skippedCount++;
+      }
+    }
+    return { imported: importedCount, skipped: skippedCount };
+  };
+
+  const importPendingEntries = async (
+    pendingEntries: PendingMarkdownEntry[],
+  ): Promise<{ imported: number; skipped: number }> => {
+    if (pendingEntries.length === 0) return { imported: 0, skipped: 0 };
+
+    let vectors: number[][];
+    try {
+      embedBatches++;
+      vectors = typeof ctx.embedder!.embedBatchPassage === "function"
+        ? await ctx.embedder!.embedBatchPassage(pendingEntries.map((entry) => entry.text))
+        : await Promise.all(pendingEntries.map((entry) => ctx.embedder!.embedPassage(entry.text)));
+      console.log(`  [import] embedded batch ${embedBatches} (${pendingEntries.length} entries)`);
+    } catch (err) {
+      console.warn(`  [import-markdown] batch embedding failed (${err}); retrying entries individually`);
+      errorCount++;
+      let importedCount = 0;
+      let skippedCount = 0;
+      for (const pending of pendingEntries) {
+        try {
+          const vector = await ctx.embedder!.embedPassage(pending.text);
+          const result = await importEntriesIndividually([buildMarkdownImportEntry(pending, vector)]);
+          importedCount += result.imported;
+          skippedCount += result.skipped;
+        } catch (entryErr) {
+          console.warn(`  Failed to import: ${pending.text.slice(0, 60)}... — ${entryErr}`);
+          errorCount++;
+          skippedCount++;
+        }
+      }
+      return { imported: importedCount, skipped: skippedCount };
+    }
+
+    if (vectors.length !== pendingEntries.length) {
+      console.warn(
+        `  [import-markdown] batch embedding returned ${vectors.length}/${pendingEntries.length} vector(s); retrying entries individually`,
+      );
+      let importedCount = 0;
+      let skippedCount = 0;
+      for (const pending of pendingEntries) {
+        try {
+          const vector = await ctx.embedder!.embedPassage(pending.text);
+          const result = await importEntriesIndividually([buildMarkdownImportEntry(pending, vector)]);
+          importedCount += result.imported;
+          skippedCount += result.skipped;
+        } catch (entryErr) {
+          console.warn(`  Failed to import: ${pending.text.slice(0, 60)}... — ${entryErr}`);
+          errorCount++;
+          skippedCount++;
+        }
+      }
+      return { imported: importedCount, skipped: skippedCount };
+    }
+
+    const entries = pendingEntries.map((pending, index) =>
+      buildMarkdownImportEntry(pending, vectors[index]),
+    );
+
+    if (typeof ctx.store.bulkStore === "function") {
+      try {
+        bulkStoreCalls++;
+        const persisted = await ctx.store.bulkStore(entries, ({ index, reason }) => {
+          console.warn(`  [import-markdown] dropped invalid entry ${index}: ${reason}`);
+        });
+        const persistedCount = Array.isArray(persisted) ? persisted.length : entries.length;
+        console.log(`  [import] stored batch ${bulkStoreCalls} (${persistedCount}/${entries.length} entries, total: ${imported + persistedCount})`);
+        return { imported: persistedCount, skipped: entries.length - persistedCount };
+      } catch (err) {
+        console.warn(`  [import-markdown] batch store failed (${err}); retrying entries individually`);
+        errorCount++;
+      }
+    }
+
+    return importEntriesIndividually(entries);
+  };
+
+  // Parse each file for memory entries (lines starting with "- ")
+  for (const { filePath, scope: discoveredScope } of mdFiles) {
+    let content: string;
+    try {
+      // 已在收集時用 withFileTypes: true 過濾，直接讀取
+      console.log(`[scan] reading: ${filePath}`);
+      foundFiles++;
+      content = await fsPromises.readFile(filePath, "utf-8");
+    } catch (err) {
+      // I/O errors (permissions, corruption, etc.)
+      console.warn(`  [skip] read failed: ${filePath}: ${(err as Error).message}`);
+      skipped++;
+      errorCount++;
+      continue;
+    }
+    // (fix(import-markdown): CI測試登記 + .md目錄skip保護)
+    // Strip UTF-8 BOM (e.g. from Windows Notepad-saved files)
+    content = content.replace(/^\uFEFF/, "");
+    // Normalize line endings: handle both CRLF (\r\n) and LF (\n)
+    const lines = content.split(/\r?\n/);
+    const pendingEntries: PendingMarkdownEntry[] = [];
+    let fileSkipped = 0;
+
+    for (const line of lines) {
+      // Skip non-memory lines
+      // Supports: "- text", "* text", "+ text" (standard Markdown bullet formats)
+      if (!/^[-*+]\s/.test(line)) continue;
+      const text = line.slice(2).trim();
+      entriesProcessed++;
+      if (text.length < minTextLength) {
+        skipped++;
+        skippedShort++;
+        fileSkipped++;
+        console.log(`  [skip] too short [${options.scope || discoveredScope}]: ${text}`);
+        continue;
+      }
+
+      // Use --scope if provided, otherwise fall back to per-file discovered scope.
+      // This prevents cross-workspace leakage: without --scope, each workspace
+      // writes to its own scope instead of collapsing everything into "global".
+      const effectiveScope = options.scope || discoveredScope;
+
+      // ── Deduplication check (scope-aware exact match) ───────────────────
+      // Run even in dry-run so --dry-run --dedup reports accurate counts
+      if (dedupEnabled) {
+        try {
+          const existing = await ctx.store.bm25Search(text, 5, [effectiveScope]);
+          if (existing.some((result) => result.entry.text === text)) {
+            skipped++;
+            skippedDedup++;
+            fileSkipped++;
+            console.log(`  [skip] dedup [${effectiveScope}]: ${text.slice(0, 60)}${text.length > 60 ? "..." : ""}`);
+            continue;
+          }
+        } catch (err) {
+          // [FIXED P2] Log warning so dedup failure is visible instead of silent
+          console.warn(`  [import-markdown] dedup check failed (${err}), proceeding with import: ${text.slice(0, 60)}...`);
+          errorCount++;
+        }
+      }
+
+      if (options.dryRun) {
+        console.log(`  [dry-run] would import: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`);
+        imported++;
+        continue;
+      }
+
+      pendingEntries.push({ text, scope: effectiveScope, sourceScope: discoveredScope, filePath });
+    }
+
+    if (!options.dryRun) {
+      if (pendingEntries.length > 0) {
+        console.log(
+          `  [import] ${pendingEntries.length} entries need embedding from ${path.basename(filePath)} ` +
+          `(${skippedDedup} dedup hit${skippedDedup === 1 ? "" : "s"} so far)`,
+        );
+      }
+      const result = await importPendingEntries(pendingEntries);
+      imported += result.imported;
+      skipped += result.skipped;
+      fileSkipped += result.skipped;
+      if (pendingEntries.length > 0 || fileSkipped > 0) {
+        console.log(
+          `  [import-markdown] ${path.basename(filePath)}: ` +
+          `${result.imported} imported, ${fileSkipped} skipped`,
+        );
+      }
+    }
+  }
+
+  console.log(`[import] parsed ${entriesProcessed} entr${entriesProcessed === 1 ? "y" : "ies"} from ${foundFiles} file(s)`);
+  printSummary();
+  return {
+    imported,
+    skipped,
+    foundFiles,
+    entriesProcessed,
+    skippedShort,
+    skippedDedup,
+    errorCount,
+    elapsedMs: Date.now() - startMs,
+    embedBatches,
+    bulkStoreCalls,
+  };
+    }
+
+
+export function registerMemoryCLI(program: Command, context: CLIContext): void {
+  let lastSearchDiagnostics: ReturnType<MemoryRetriever["getLastDiagnostics"]> =
+    null;
+
+  const captureSearchDiagnostics = (
+    retriever: Pick<MemoryRetriever, "getLastDiagnostics">,
+  ) => {
+    lastSearchDiagnostics =
+      typeof retriever.getLastDiagnostics === "function"
+        ? retriever.getLastDiagnostics()
+        : null;
+  };
+
+  const getSearchRetriever = (): MemoryRetriever => {
+    if (!context.embedder) {
+      return context.retriever;
+    }
+    return createRetriever(context.store, context.embedder, context.retriever.getConfig());
+  };
+
+  const runSearch = async (
+    query: string,
+    limit: number,
+    scopeFilter?: string[],
+    category?: string,
+  ) => {
+    lastSearchDiagnostics = null;
+    const retriever = getSearchRetriever();
+    let results;
+    try {
+      results = await retriever.retrieve({
+        query,
+        limit,
+        scopeFilter,
+        category,
+        source: "cli",
+      });
+      captureSearchDiagnostics(retriever);
+    } catch (error) {
+      captureSearchDiagnostics(retriever);
+      throw error;
+    }
+
+    if (results.length === 0 && context.embedder) {
+      await sleep(75);
+      const retryRetriever = getSearchRetriever();
+      try {
+        results = await retryRetriever.retrieve({
+          query,
+          limit,
+          scopeFilter,
+          category,
+          source: "cli",
+        });
+        captureSearchDiagnostics(retryRetriever);
+      } catch (error) {
+        captureSearchDiagnostics(retryRetriever);
+        throw error;
+      }
+      return {
+        results,
+        diagnostics: lastSearchDiagnostics,
+      };
+    }
+
+    return {
+      results,
+      diagnostics: lastSearchDiagnostics,
+    };
+  };
+
+  const memory = program
+    .command("memory-pro")
+    .description("Enhanced memory management commands (LanceDB Pro)");
+
+  // Version
+  memory
+    .command("version")
+    .description("Print plugin version")
+    .action(() => {
+      console.log(getPluginVersion());
+    });
+
+  const auth = memory
+    .command("auth")
+    .description("Manage OAuth authentication for smart-extraction LLM access");
+
+  auth
+    .command("login")
+    .description("Authenticate with ChatGPT/Codex in a browser, save the plugin OAuth file, and switch this plugin to llm.auth=oauth")
+    .option("--config <path>", "OpenClaw config file to update")
+    .option("--provider <provider>", `OAuth provider to use (${OAUTH_PROVIDER_CHOICES})`)
+    .option("--model <model>", "Override the model saved into llm.model")
+    .option("--oauth-path <path>", "OAuth file path (default: ~/.openclaw/.memory-lancedb-pro/oauth.json)")
+    .option("--timeout <seconds>", "OAuth callback timeout in seconds", "120")
+    .option("--no-browser", "Do not auto-open the browser; print the authorization URL only")
+    .action(async (options) => {
+      try {
+        const pluginId = context.pluginId || "memory-lancedb-pro";
+        const currentLlm = context.pluginConfig?.llm;
+        const currentProvider = currentLlm && typeof currentLlm === "object" && typeof (currentLlm as any).oauthProvider === "string"
+          ? String((currentLlm as any).oauthProvider)
+          : undefined;
+        const selectedProvider = await resolveOauthProviderSelection(
+          currentProvider,
+          options.provider,
+          context.oauthTestHooks?.chooseProvider,
+        );
+        const currentModel = currentLlm && typeof currentLlm === "object" && typeof (currentLlm as any).model === "string"
+          ? String((currentLlm as any).model)
+          : undefined;
+        const selectedModel = pickOauthModel(selectedProvider.providerId, currentModel, options.model);
+        const oauthModel = normalizeOauthModel(selectedModel.model);
+        const configPath = resolveOpenClawConfigPath(options.config);
+        const oauthPath = resolveLoginOauthPath(options.oauthPath);
+        const timeoutMs = clampInt((parseInt(options.timeout, 10) || 120) * 1000, 15_000, 900_000);
+
+        if (selectedModel.source === "default" && currentModel && currentModel.trim()) {
+          console.log(
+            `Configured llm.model "${currentModel}" is not supported by provider ${selectedProvider.providerId}. Falling back to ${getDefaultOauthModelForProvider(selectedProvider.providerId)}.`,
+          );
+        }
+
+        console.log(`Config file: ${configPath}`);
+        console.log(`Provider: ${getOAuthProviderLabel(selectedProvider.providerId)} (${selectedProvider.providerId}, ${selectedProvider.source})`);
+        console.log(`OAuth file: ${oauthPath}`);
+        console.log(`Model: ${oauthModel} (${selectedModel.source})`);
+
+        const { session } = await performOAuthLogin({
+          authPath: oauthPath,
+          timeoutMs,
+          noBrowser: options.browser === false,
+          model: selectedModel.model,
+          providerId: selectedProvider.providerId,
+          onOpenUrl: context.oauthTestHooks?.openUrl,
+          onAuthorizeUrl: async (url) => {
+            console.log(`Authorization URL: ${url}`);
+            await context.oauthTestHooks?.authorizeUrl?.(url);
+          },
+        });
+
+        const openclawConfig = await loadOpenClawConfig(configPath);
+        const pluginConfig = ensurePluginConfigRoot(openclawConfig, pluginId);
+        const hadLlmConfig = isPlainObject(pluginConfig.llm);
+        const existingLlm = hadLlmConfig ? { ...(pluginConfig.llm as Record<string, unknown>) } : {};
+        const wasOauthMode = isOauthLlmConfig(existingLlm);
+
+        if (!wasOauthMode) {
+          await saveOauthLlmBackup(oauthPath, pluginConfig.llm, hadLlmConfig);
+        }
+
+        const nextLlm = wasOauthMode ? { ...existingLlm } : extractOauthSafeLlmConfig(existingLlm);
+        delete nextLlm.apiKey;
+        if (!wasOauthMode) {
+          delete nextLlm.baseURL;
+        }
+        pluginConfig.llm = {
+          ...nextLlm,
+          auth: "oauth",
+          oauthProvider: selectedProvider.providerId,
+          model: oauthModel,
+          oauthPath,
+        };
+        await saveOpenClawConfig(configPath, openclawConfig);
+
+        console.log(`OAuth login completed for account ${session.accountId}.`);
+        console.log(
+          `Updated ${pluginId} config: llm.auth=oauth, llm.oauthProvider=${selectedProvider.providerId}, llm.oauthPath=${oauthPath}, llm.model=${oauthModel}`,
+        );
+      } catch (error) {
+        console.error("OAuth login failed:", error);
+        process.exit(1);
+      }
+    });
+
+  auth
+    .command("status")
+    .description("Show the current OAuth configuration for this plugin")
+    .option("--config <path>", "OpenClaw config file to inspect")
+    .action(async (options) => {
+      try {
+        const pluginId = context.pluginId || "memory-lancedb-pro";
+        const configPath = resolveOpenClawConfigPath(options.config);
+        const openclawConfig = await loadOpenClawConfig(configPath);
+        const pluginConfig = ensurePluginConfigRoot(openclawConfig, pluginId);
+        const llm = typeof pluginConfig.llm === "object" && pluginConfig.llm ? pluginConfig.llm as Record<string, unknown> : {};
+        const oauthProviderRaw = typeof llm.oauthProvider === "string" && llm.oauthProvider.trim()
+          ? llm.oauthProvider.trim()
+          : normalizeOAuthProviderId();
+        let oauthProviderDisplay = `${oauthProviderRaw} (unknown)`;
+        try {
+          oauthProviderDisplay = `${normalizeOAuthProviderId(oauthProviderRaw)} (${getOAuthProviderLabel(oauthProviderRaw)})`;
+        } catch {
+          // Leave the raw provider id visible for debugging stale or unsupported configs.
+        }
+        const oauthPath = resolveConfiguredOauthPath(configPath, llm.oauthPath);
+
+        let tokenInfo = "missing";
+        try {
+          const session = await readFile(oauthPath, "utf8");
+          tokenInfo = session.trim() ? "present" : "empty";
+        } catch {
+          tokenInfo = "missing";
+        }
+
+        console.log(`Config file: ${configPath}`);
+        console.log(`Plugin: ${pluginId}`);
+        console.log(`llm.auth: ${typeof llm.auth === "string" ? llm.auth : "api-key"}`);
+        console.log(`llm.oauthProvider: ${oauthProviderDisplay}`);
+        console.log(`llm.model: ${typeof llm.model === "string" ? llm.model : "openai/gpt-oss-120b"}`);
+        console.log(`llm.oauthPath: ${oauthPath}`);
+        console.log(`oauth file: ${tokenInfo}`);
+      } catch (error) {
+        console.error("OAuth status failed:", error);
+        process.exit(1);
+      }
+    });
+
+  auth
+    .command("logout")
+    .description("Delete the plugin OAuth file and switch this plugin back to llm.auth=api-key")
+    .option("--config <path>", "OpenClaw config file to update")
+    .option("--oauth-path <path>", "OAuth file path to remove")
+    .action(async (options) => {
+      try {
+        const pluginId = context.pluginId || "memory-lancedb-pro";
+        const configPath = resolveOpenClawConfigPath(options.config);
+        const openclawConfig = await loadOpenClawConfig(configPath);
+        const pluginConfig = ensurePluginConfigRoot(openclawConfig, pluginId);
+        const llm = typeof pluginConfig.llm === "object" && pluginConfig.llm ? pluginConfig.llm as Record<string, unknown> : {};
+        const oauthPath =
+          options.oauthPath && String(options.oauthPath).trim()
+            ? resolveLoginOauthPath(options.oauthPath)
+            : resolveConfiguredOauthPath(configPath, llm.oauthPath);
+        const backupPath = getOauthBackupPath(oauthPath);
+        const backup = await loadOauthLlmBackup(oauthPath);
+
+        await rm(oauthPath, { force: true });
+        await rm(backupPath, { force: true });
+
+        if (backup) {
+          if (backup.hadLlmConfig) {
+            pluginConfig.llm = { ...backup.llm };
+          } else {
+            delete pluginConfig.llm;
+          }
+        } else {
+          const fallbackLlm = buildLogoutFallbackLlmConfig(llm);
+          if (hasRestorableApiKeyLlmConfig(fallbackLlm)) {
+            pluginConfig.llm = fallbackLlm;
+          } else {
+            delete pluginConfig.llm;
+          }
+        }
+        await saveOpenClawConfig(configPath, openclawConfig);
+
+        console.log(`Deleted OAuth file: ${oauthPath}`);
+        console.log(`Updated ${pluginId} config: llm.auth=api-key`);
+      } catch (error) {
+        console.error("OAuth logout failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // List memories
+  memory
+    .command("list")
+    .description("List memories with optional filtering")
+    .option("--scope <scope>", "Filter by scope")
+    .option("--category <category>", "Filter by category")
+    .option("--limit <n>", "Maximum number of results", "20")
+    .option("--offset <n>", "Number of results to skip", "0")
+    .option("--json", "Output as JSON")
+    .option("--include-invalidated", "Include invalidated/superseded rows (excluded by default)", false)
+    .action(async (options) => {
+      try {
+        const limit = parseInt(options.limit) || 20;
+        const offset = parseInt(options.offset) || 0;
+
+        let scopeFilter: string[] | undefined;
+        if (options.scope) {
+          scopeFilter = [options.scope];
+        }
+
+        const memories = await context.store.list(
+          scopeFilter,
+          options.category,
+          limit,
+          offset,
+          { excludeInactive: !options.includeInvalidated },
+        );
+
+        if (options.json) {
+          writeJson(memories);
+        } else {
+          if (memories.length === 0) {
+            console.log("No memories found.");
+          } else {
+            console.log(`Found ${memories.length} memories:\n`);
+            memories.forEach((memory, i) => {
+              console.log(formatMemory(memory, offset + i));
+            });
+          }
+        }
+      } catch (error) {
+        console.error("Failed to list memories:", error);
+        process.exit(1);
+      }
+    });
+
+  // Search memories
+  memory
+    .command("search <query>")
+    .description("Search memories using hybrid retrieval")
+    .option("--scope <scope>", "Search within specific scope")
+    .option("--category <category>", "Filter by category")
+    .option("--limit <n>", "Maximum number of results", "10")
+    .option("--debug", "Show retrieval diagnostics")
+    .option("--json", "Output as JSON")
+    .action(async (query, options) => {
+      try {
+        const limit = parseInt(options.limit) || 10;
+
+        let scopeFilter: string[] | undefined;
+        if (options.scope) {
+          scopeFilter = [options.scope];
+        }
+
+        const { results, diagnostics } = await runSearch(
+          query,
+          limit,
+          scopeFilter,
+          options.category,
+        );
+
+        if (options.json) {
+          writeJson(options.debug ? { diagnostics, results } : results);
+        } else {
+          if (options.debug && diagnostics) {
+            for (const line of formatRetrievalDiagnosticsLines(diagnostics)) {
+              console.log(line);
+            }
+            console.log();
+          }
+          if (results.length === 0) {
+            console.log("No relevant memories found.");
+          } else {
+            console.log(`Found ${results.length} memories:\n`);
+            results.forEach((result, i) => {
+              const sources = [];
+              if (result.sources.vector) sources.push("vector");
+              if (result.sources.bm25) sources.push("BM25");
+              if (result.sources.reranked) sources.push("reranked");
+
+              console.log(
+                `${i + 1}. [${result.entry.id}] [${result.entry.category}:${result.entry.scope}] ${result.entry.text} ` +
+                `(${(result.score * 100).toFixed(0)}%, ${sources.join('+')})`
+              );
+            });
+          }
+        }
+      } catch (error) {
+        const diagnostics = options.debug ? lastSearchDiagnostics : null;
+        if (options.json) {
+          writeJson(buildSearchErrorPayload(error, diagnostics, options.debug));
+          process.exit(1);
+        }
+        if (diagnostics) {
+          for (const line of formatRetrievalDiagnosticsLines(diagnostics)) {
+            console.error(line);
+          }
+        }
+        console.error("Search failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Memory statistics
+  memory
+    .command("stats")
+    .description("Show memory statistics")
+    .option("--scope <scope>", "Stats for specific scope")
+    .option("--json", "Output as JSON")
+    .action(async (options) => {
+      try {
+        let scopeFilter: string[] | undefined;
+        if (options.scope) {
+          scopeFilter = [options.scope];
+        }
+
+        const stats = await context.store.stats(scopeFilter);
+        const scopeStats = context.scopeManager.getStats();
+        const retrievalConfig = context.retriever.getConfig();
+
+        const summary = {
+          memory: stats,
+          scopes: scopeStats,
+          retrieval: {
+            mode: retrievalConfig.mode,
+            hasFtsSupport: context.store.hasFtsSupport,
+          },
+        };
+
+        if (options.json) {
+          writeJson(summary);
+        } else {
+          console.log(`Memory Statistics:`);
+          console.log(`• Live memories: ${stats.liveCount}`);
+          console.log(`• Total memories: ${stats.totalCount}`);
+          console.log(`• Available scopes: ${scopeStats.totalScopes}`);
+          console.log(`• Retrieval mode: ${retrievalConfig.mode}`);
+          console.log(`• FTS support: ${context.store.hasFtsSupport ? 'Yes' : 'No'}`);
+          console.log();
+
+          console.log("Memories by scope:");
+          Object.entries(stats.scopeCounts).forEach(([scope, count]) => {
+            console.log(`  • ${scope}: ${count}`);
+          });
+          console.log();
+
+          console.log("Memories by category:");
+          Object.entries(stats.categoryCounts).forEach(([category, count]) => {
+            console.log(`  • ${category}: ${count}`);
+          });
+        }
+      } catch (error) {
+        console.error("Failed to get statistics:", error);
+        process.exit(1);
+      }
+    });
+
+  // Delete memory
+  memory
+    .command("delete <id>")
+    .description("Delete a specific memory by ID")
+    .option("--scope <scope>", "Scope to delete from (for access control)")
+    .action(async (id, options) => {
+      try {
+        let scopeFilter: string[] | undefined;
+        if (options.scope) {
+          scopeFilter = [options.scope];
+        }
+
+        const deleted = await context.store.delete(id, scopeFilter);
+
+        if (deleted) {
+          context.onMemoriesDeleted?.({ scopeFilter });
+          console.log(`Memory ${id} deleted successfully.`);
+          printReadConsistencyHint(context.store);
+        } else {
+          console.log(`Memory ${id} not found or access denied.`);
+          process.exit(1);
+        }
+      } catch (error) {
+        console.error("Failed to delete memory:", error);
+        process.exit(1);
+      }
+    });
+
+  // Bulk delete
+  memory
+    .command("delete-bulk")
+    .description("Bulk delete memories with filters")
+    .option("--scope <scopes...>", "Scopes to delete from (required)")
+    .option("--before <date>", "Delete memories before this date (YYYY-MM-DD)")
+    .option("--dry-run", "Show what would be deleted without actually deleting")
+    .action(async (options) => {
+      try {
+        if (!options.scope || options.scope.length === 0) {
+          console.error("At least one scope must be specified for safety.");
+          process.exit(1);
+        }
+
+        let beforeTimestamp: number | undefined;
+        if (options.before) {
+          const date = new Date(options.before);
+          if (isNaN(date.getTime())) {
+            console.error("Invalid date format. Use YYYY-MM-DD.");
+            process.exit(1);
+          }
+          beforeTimestamp = date.getTime();
+        }
+
+        if (options.dryRun) {
+          console.log("DRY RUN - No memories will be deleted");
+          console.log(`Filters: scopes=${options.scope.join(',')}, before=${options.before || 'none'}`);
+
+          // Show what would be deleted
+          const stats = await context.store.stats(options.scope);
+          console.log(`Would delete from ${stats.totalCount} memories in matching scopes.`);
+        } else {
+          const deletedCount = await context.store.bulkDelete(options.scope, beforeTimestamp);
+          if (deletedCount > 0) {
+            context.onMemoriesDeleted?.({ scopeFilter: options.scope });
+          }
+          console.log(`Deleted ${deletedCount} memories.`);
+          printReadConsistencyHint(context.store);
+        }
+      } catch (error) {
+        console.error("Bulk delete failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Export memories
+  memory
+    .command("export")
+    .description("Export memories to JSON")
+    .option("--scope <scope>", "Export specific scope")
+    .option("--category <category>", "Export specific category")
+    .option("--output <file>", "Output file (default: stdout)")
+    .action(async (options) => {
+      try {
+        let scopeFilter: string[] | undefined;
+        if (options.scope) {
+          scopeFilter = [options.scope];
+        }
+
+        const memories = await context.store.list(
+          scopeFilter,
+          options.category,
+          // excludeInactive:false -- export is a backup/forensic view and must
+          // keep full-dump semantics, including invalidated/superseded rows
+          // (item 6, PR #946).
+          1000, // Large limit for export
+          0,
+          { excludeInactive: false },
+        );
+
+        const exportData = {
+          version: "1.0",
+          exportedAt: new Date().toISOString(),
+          count: memories.length,
+          filters: {
+            scope: options.scope,
+            category: options.category,
+          },
+          memories: memories.map(m => ({
+            ...m,
+            vector: undefined, // Exclude vectors to reduce size
+          })),
+        };
+
+        const output = formatJson(exportData);
+
+        if (options.output) {
+          const fs = await import("node:fs/promises");
+          await fs.writeFile(options.output, output);
+          console.log(`Exported ${memories.length} memories to ${options.output}`);
+        } else {
+          writeStdout(output);
+        }
+      } catch (error) {
+        console.error("Export failed:", error);
+        process.exit(1);
+      }
+    });
+
+  const sync = memory
+    .command("sync")
+    .description("Sync memories to external local formats");
+
+  sync
+    .command("obsidian")
+    .description("Export memories to Markdown notes in an Obsidian vault")
+    .requiredOption("--vault <path>", "Obsidian vault path")
+    .option("--scope <scope>", "Export specific scope")
+    .option("--category <category>", "Export specific category")
+    .option("--limit <number>", "Maximum memories to export", "1000")
+    .option("--dry-run", "Show what would be written without creating files")
+    .option("--include-invalidated", "Include invalidated/superseded rows (excluded by default)", false)
+    .action(async (options) => {
+      try {
+        const limit = clampInt(Number(options.limit), 1, 10000);
+        const scopeFilter = options.scope ? [String(options.scope)] : undefined;
+        const memories = await context.store.list(
+          scopeFilter,
+          options.category,
+          limit,
+          0,
+          { excludeInactive: !options.includeInvalidated },
+        );
+        const vault = path.resolve(String(options.vault));
+        const root = path.join(vault, "00-AI-Memory");
+
+        let created = 0;
+        let updated = 0;
+        let skipped = 0;
+
+        for (const memory of memories) {
+          const category = String(memory.category || "other");
+          const dirName = OBSIDIAN_CATEGORY_DIRS[category] || OBSIDIAN_CATEGORY_DIRS.other;
+          const title = memoryTitle(memory);
+          const shortId = safeObsidianSlug(String(memory.id || "memory")).slice(0, 12);
+          const fileName = `${memoryDate(memory)}-${safeObsidianSlug(title)}-${shortId}.md`;
+          const filePath = path.join(root, dirName, fileName);
+          const body = formatObsidianMemory(memory);
+
+          if (options.dryRun) {
+            console.log(`[dry-run] ${filePath}`);
+            created++;
+            continue;
+          }
+
+          await mkdir(path.dirname(filePath), { recursive: true });
+
+          let existing: string | null = null;
+          try {
+            existing = await readFile(filePath, "utf8");
+          } catch {
+            existing = null;
+          }
+
+          if (existing === body) {
+            skipped++;
+            continue;
+          }
+
+          await writeFile(filePath, body, "utf8");
+          if (existing == null) {
+            created++;
+          } else {
+            updated++;
+          }
+        }
+
+        console.log(`Obsidian sync ${options.dryRun ? "dry-run" : "completed"}: ${created} created, ${updated} updated, ${skipped} skipped`);
+        console.log(`Vault: ${vault}`);
+      } catch (error) {
+        console.error("Obsidian sync failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Import memories
+  memory
+    .command("import <file>")
+    .description("Import memories from JSON file")
+    .option("--scope <scope>", "Import into specific scope")
+    .option("--dry-run", "Show what would be imported without actually importing")
+    .action(async (file, options) => {
+      try {
+        const fs = await import("node:fs/promises");
+        const content = await fs.readFile(file, "utf-8");
+        const data = JSON.parse(content);
+
+        if (!data.memories || !Array.isArray(data.memories)) {
+          throw new Error("Invalid import file format");
+        }
+
+        if (options.dryRun) {
+          console.log("DRY RUN - No memories will be imported");
+          console.log(`Would import ${data.memories.length} memories`);
+          if (options.scope) {
+            console.log(`Target scope: ${options.scope}`);
+          }
+          return;
+        }
+
+        console.log(`Importing ${data.memories.length} memories...`);
+
+        let imported = 0;
+        let skipped = 0;
+
+        if (!context.embedder) {
+          console.error("Import requires an embedder (not available in basic CLI mode).");
+          console.error("Use the plugin's memory_store tool or pass embedder to createMemoryCLI.");
+          return;
+        }
+
+        const targetScope = options.scope || context.scopeManager.getDefaultScope();
+
+        for (const memory of data.memories) {
+          try {
+            const text = memory.text;
+            if (!text || typeof text !== "string" || text.length < 2) {
+              skipped++;
+              continue;
+            }
+
+            const categoryRaw = memory.category;
+            const category: MemoryEntry["category"] =
+              categoryRaw === "preference" ||
+                categoryRaw === "fact" ||
+                categoryRaw === "decision" ||
+                categoryRaw === "entity" ||
+                categoryRaw === "other"
+                ? categoryRaw
+                : "other";
+
+            // Pass raw importance to importEntry — it applies clampImportance
+            // (v2+ 0~1) inside, which is idempotent and preserves 0, 1, and
+            // decimal values. The previous pre-clamp here could silently turn
+            // legacy values like 4 into 1 and then into 0.20 after legacy
+            // normalization (see PR #828 review).
+            const importanceRaw = Number(memory.importance);
+            const importance = Number.isFinite(importanceRaw) ? importanceRaw : 0.7;
+
+            const timestampRaw = Number(memory.timestamp);
+            const timestamp = Number.isFinite(timestampRaw) ? timestampRaw : Date.now();
+
+            const metadataRaw = memory.metadata;
+            const metadata =
+              typeof metadataRaw === "string"
+                ? metadataRaw
+                : metadataRaw != null
+                  ? JSON.stringify(metadataRaw)
+                  : "{}";
+
+            const idRaw = memory.id;
+            const id = typeof idRaw === "string" && idRaw.length > 0 ? idRaw : undefined;
+
+            // Idempotency: if the import file includes an id and we already have it, skip.
+            if (id && (await context.store.hasId(id))) {
+              skipped++;
+              continue;
+            }
+
+            // Back-compat dedupe: if no id provided, do a best-effort similarity check.
+            if (!id) {
+              const existing = await context.retriever.retrieve({
+                query: text,
+                limit: 1,
+                scopeFilter: [targetScope],
+              });
+              if (existing.length > 0 && existing[0].score > 0.95) {
+                skipped++;
+                continue;
+              }
+            }
+
+            const vector = await context.embedder.embedPassage(text);
+
+            if (id) {
+              await context.store.importEntry({
+                id,
+                text,
+                vector,
+                category,
+                scope: targetScope,
+                importance,
+                timestamp,
+                metadata,
+              });
+            } else {
+              await context.store.store({
+                text,
+                vector,
+                importance,
+                category,
+                scope: targetScope,
+                metadata,
+              });
+            }
+
+            imported++;
+          } catch (error) {
+            console.warn(`Failed to import memory: ${error}`);
+            skipped++;
+          }
+        }
+
+        console.log(`Import completed: ${imported} imported, ${skipped} skipped`);
+      } catch (error) {
+        console.error("Import failed:", error);
+        process.exit(1);
+      }
+    });
+
+  /**
+   * import-markdown: Import memories from Markdown memory files into the plugin store.
+   * Targets MEMORY.md and memory/YYYY-MM-DD.md files found in OpenClaw workspaces.
+   */
+  memory
+    .command("import-markdown [workspace-glob]")
+    .description("Import memories from Markdown files (MEMORY.md, memory/YYYY-MM-DD.md) into the plugin store")
+    .option("--dry-run", "Show what would be imported without importing")
+    .option("--scope <scope>", "Import into specific scope (default: auto-discovered from workspace)")
+    .option(
+      "--openclaw-home <path>",
+      "OpenClaw home directory (default: ~/.openclaw)",
+    )
+    .option(
+      "--dedup",
+      "Skip entries already in store (scope-aware exact match, requires store.bm25Search)",
+    )
+    .option(
+      "--min-text-length <n>",
+      "Minimum text length to import (default: 5)",
+      "5",
+    )
+    .option(
+      "--importance <n>",
+      "Importance score for imported entries, 0.0-1.0 (default: 0.7)",
+      "0.7",
+    )
+    .action(async (workspaceGlob, options) => {
+      // [FIXED P1] Wrap with try/catch — runImportMarkdown now throws instead of process.exit(1)
+      try {
+        const result = await runImportMarkdown(context, workspaceGlob, options);
+        if (result.foundFiles === 0) {
+          console.log("No Markdown memory files found.");
+        }
+        // Summary is printed inside runImportMarkdown (removed duplicate output)
+      } catch (err) {
+        console.error(`import-markdown failed: ${err}`);
+        process.exit(1);
+      }
+    });
+
+  // Re-embed an existing LanceDB into the current target DB (A/B testing)
+  memory
+    .command("reembed")
+    .description("Re-embed memories from a source LanceDB database into the current target database")
+    .requiredOption("--source-db <path>", "Source LanceDB database directory")
+    .option("--batch-size <n>", "Batch size for embedding calls", "32")
+    .option("--limit <n>", "Limit number of rows to process (for testing)")
+    .option("--dry-run", "Show what would be re-embedded without writing")
+    .option("--skip-existing", "Skip entries whose id already exists in the target DB")
+    .option("--force", "Allow using the same source-db as the target dbPath (DANGEROUS)")
+    .action(async (options) => {
+      try {
+        if (!context.embedder) {
+          console.error("Re-embed requires an embedder (not available in basic CLI mode).");
+          return;
+        }
+
+        const fs = await import("node:fs/promises");
+
+        const sourceDbPath = options.sourceDb as string;
+        const batchSize = clampInt(parseInt(options.batchSize, 10) || 32, 1, 128);
+        const limit = options.limit ? clampInt(parseInt(options.limit, 10) || 0, 1, 1000000) : undefined;
+        const dryRun = options.dryRun === true;
+        const skipExisting = options.skipExisting === true;
+        const force = options.force === true;
+
+        // Safety: prevent accidental in-place re-embedding
+        let sourceReal = sourceDbPath;
+        let targetReal = context.store.dbPath;
+        try {
+          sourceReal = await fs.realpath(sourceDbPath);
+        } catch { }
+        try {
+          targetReal = await fs.realpath(context.store.dbPath);
+        } catch { }
+
+        if (!force && sourceReal === targetReal) {
+          console.error("Refusing to re-embed in-place: source-db equals target dbPath. Use a new dbPath or pass --force.");
+          process.exit(1);
+        }
+
+        const lancedb = await loadLanceDB();
+        const db = await lancedb.connect(sourceDbPath);
+        const table = await db.openTable("memories");
+
+        let query = table
+          .query()
+          .select(["id", "text", "category", "scope", "importance", "timestamp", "metadata"]);
+
+        if (limit) query = query.limit(limit);
+
+        const rows = (await query.toArray())
+          .filter((r: any) => r && typeof r.text === "string" && r.text.trim().length > 0)
+          .filter((r: any) => r.id && r.id !== "__schema__");
+
+        if (rows.length === 0) {
+          console.log("No source memories found.");
+          return;
+        }
+
+        console.log(
+          `Re-embedding ${rows.length} memories from ${sourceDbPath} → ${context.store.dbPath} (batchSize=${batchSize})`
+        );
+
+        if (dryRun) {
+          console.log("DRY RUN - No memories will be written");
+          console.log(`First example: ${rows[0].id?.slice?.(0, 8)} ${String(rows[0].text).slice(0, 80)}`);
+          return;
+        }
+
+        let processed = 0;
+        let imported = 0;
+        let skipped = 0;
+        let scopeless = 0;
+
+        for (let i = 0; i < rows.length; i += batchSize) {
+          const batch = rows.slice(i, i + batchSize);
+          const texts = batch.map((r: any) => String(r.text));
+          const vectors = await context.embedder.embedBatchPassage(texts);
+
+          for (let j = 0; j < batch.length; j++) {
+            processed++;
+            const row = batch[j];
+            const vector = vectors[j];
+
+            if (!vector || vector.length === 0) {
+              skipped++;
+              continue;
+            }
+
+            const id = String(row.id);
+            if (skipExisting) {
+              const exists = await context.store.hasId(id);
+              if (exists) {
+                skipped++;
+                continue;
+              }
+            }
+
+            // Never launder a missing/blank scope into "global": that would
+            // promote rows invisible to every scoped reader into data every
+            // agent can see, bypassing importEntry's fail-closed contract.
+            const rowScope = typeof row.scope === "string" ? row.scope.trim() : "";
+            if (!rowScope) {
+              scopeless++;
+              if (scopeless <= 20) {
+                console.warn(`  Skipping scope-less legacy row ${id.slice(0, 8)}: assign scopes in the source store (memory-pro repair-scopes) and re-run.`);
+              }
+              continue;
+            }
+
+            const entry: MemoryEntry = {
+              id,
+              text: String(row.text),
+              vector,
+              category: (row.category as any) || "other",
+              scope: rowScope,
+              importance: (row.importance != null) ? Number(row.importance) : 0.7,
+              timestamp: (row.timestamp != null) ? Number(row.timestamp) : Date.now(),
+              metadata: typeof row.metadata === "string" ? row.metadata : "{}",
+            };
+
+            await context.store.importEntry(entry);
+            imported++;
+          }
+
+          if (processed % 100 === 0 || processed === rows.length) {
+            console.log(`Progress: ${processed}/${rows.length} processed, ${imported} imported, ${skipped} skipped`);
+          }
+        }
+
+        console.log(`Re-embed completed: ${imported} imported, ${skipped} skipped, ${scopeless} scope-less legacy row(s) left for repair-scopes (processed=${processed}).`);
+      } catch (error) {
+        console.error("Re-embed failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Upgrade legacy memories to new smart memory format
+  memory
+    .command("upgrade")
+    .description("Upgrade legacy memories to new 6-category L0/L1/L2 smart memory format")
+    .option("--dry-run", "Show upgrade statistics without modifying data")
+    .option("--batch-size <n>", "Number of memories per batch", "10")
+    .option("--no-llm", "Skip LLM calls; use simple text truncation for L0/L1")
+    .option("--limit <n>", "Maximum number of memories to upgrade")
+    .option("--scope <scope>", "Only upgrade memories in this scope")
+    .option(
+      "--categories-only",
+      "Only re-stamp memory_category on reflection-mapped rows (skip the general legacy L0/L1/L2 upgrade)",
+    )
+    .action(async (options) => {
+      try {
+        const upgrader = createMemoryUpgrader(
+          context.store,
+          options.llm === false ? null : (context.llmClient ?? null),
+          { log: console.log },
+        );
+
+        const scopeFilter = options.scope ? [options.scope] : undefined;
+
+        if (options.categoriesOnly) {
+          const result = await upgrader.normalizeMappedRowCategories({
+            dryRun: !!options.dryRun,
+            scopeFilter,
+          });
+
+          console.log(`Mapped-Row Category Normalization:`);
+          console.log(`• Reflection-mapped rows scanned: ${result.totalMapped}`);
+          console.log(`• Already correct: ${result.alreadyCorrect}`);
+          console.log(
+            `${options.dryRun ? "• [DRY-RUN] Would normalize" : "• Normalized"}: ${result.normalized}`,
+          );
+          if (result.errors.length > 0) {
+            console.log(`• Errors: ${result.errors.length}`);
+            result.errors.slice(0, 5).forEach(err => console.log(`  - ${err}`));
+            if (result.errors.length > 5) {
+              console.log(`  ... and ${result.errors.length - 5} more`);
+            }
+          }
+          return;
+        }
+
+        // Show current status first
+        const counts = await upgrader.countLegacy(scopeFilter);
+
+        console.log(`Memory Upgrade Status:`);
+        console.log(`• Total memories: ${counts.total}`);
+        console.log(`• Legacy (needs upgrade): ${counts.legacy}`);
+        console.log(`• Already new format: ${counts.total - counts.legacy}`);
+        if (Object.keys(counts.byCategory).length > 0) {
+          console.log(`• Legacy by category:`);
+          Object.entries(counts.byCategory).forEach(([cat, n]) => {
+            console.log(`    ${cat}: ${n}`);
+          });
+        }
+
+        if (counts.legacy === 0) {
+          console.log(`\nAll memories are already in the new format. No upgrade needed.`);
+          return;
+        }
+
+        if (options.dryRun) {
+          console.log(`\n[DRY-RUN] Would upgrade ${counts.legacy} memories.`);
+          return;
+        }
+
+        console.log(`\nStarting upgrade...`);
+        const result = await upgrader.upgrade({
+          dryRun: false,
+          batchSize: parseInt(options.batchSize) || 10,
+          noLlm: options.llm === false,
+          limit: options.limit ? parseInt(options.limit) : undefined,
+          scopeFilter,
+        });
+
+        console.log(`\nUpgrade Results:`);
+        console.log(`• Upgraded: ${result.upgraded}`);
+        console.log(`• Already new format: ${result.skipped}`);
+        if (result.errors.length > 0) {
+          console.log(`• Errors: ${result.errors.length}`);
+          result.errors.slice(0, 5).forEach(err => console.log(`  - ${err}`));
+          if (result.errors.length > 5) {
+            console.log(`  ... and ${result.errors.length - 5} more`);
+          }
+        }
+      } catch (error) {
+        console.error("Upgrade failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Migration commands
+  const migrate = memory
+    .command("migrate")
+    .description("Migration utilities");
+
+  migrate
+    .command("check")
+    .description("Check if migration is needed from legacy memory-lancedb")
+    .option("--source <path>", "Specific source database path")
+    .action(async (options) => {
+      try {
+        const check = await context.migrator.checkMigrationNeeded(options.source);
+
+        console.log("Migration Check Results:");
+        console.log(`• Legacy database found: ${check.sourceFound ? 'Yes' : 'No'}`);
+        if (check.sourceDbPath) {
+          console.log(`• Source path: ${check.sourceDbPath}`);
+        }
+        if (check.entryCount !== undefined) {
+          console.log(`• Entries to migrate: ${check.entryCount}`);
+        }
+        console.log(`• Migration needed: ${check.needed ? 'Yes' : 'No'}`);
+      } catch (error) {
+        console.error("Migration check failed:", error);
+        process.exit(1);
+      }
+    });
+
+  migrate
+    .command("run")
+    .description("Run migration from legacy memory-lancedb")
+    .option("--source <path>", "Specific source database path")
+    .option("--default-scope <scope>", "Default scope for migrated data", "global")
+    .option("--dry-run", "Show what would be migrated without actually migrating")
+    .option("--skip-existing", "Skip entries that already exist")
+    .action(async (options) => {
+      try {
+        const result = await context.migrator.migrate({
+          sourceDbPath: options.source,
+          defaultScope: options.defaultScope,
+          dryRun: options.dryRun,
+          skipExisting: options.skipExisting,
+        });
+
+        console.log("Migration Results:");
+        console.log(`• Status: ${result.success ? 'Success' : 'Failed'}`);
+        console.log(`• Migrated: ${result.migratedCount}`);
+        console.log(`• Skipped: ${result.skippedCount}`);
+        if (result.errors.length > 0) {
+          console.log(`• Errors: ${result.errors.length}`);
+          result.errors.forEach(error => console.log(`  - ${error}`));
+        }
+        console.log(`• Summary: ${result.summary}`);
+
+        if (!result.success) {
+          process.exit(1);
+        }
+      } catch (error) {
+        console.error("Migration failed:", error);
+        process.exit(1);
+      }
+    });
+
+  migrate
+    .command("verify")
+    .description("Verify migration results")
+    .option("--source <path>", "Specific source database path")
+    .action(async (options) => {
+      try {
+        const result = await context.migrator.verifyMigration(options.source);
+
+        console.log("Migration Verification:");
+        console.log(`• Valid: ${result.valid ? 'Yes' : 'No'}`);
+        console.log(`• Source count: ${result.sourceCount}`);
+        console.log(`• Target count: ${result.targetCount}`);
+
+        if (result.issues.length > 0) {
+          console.log("• Issues:");
+          result.issues.forEach(issue => console.log(`  - ${issue}`));
+        }
+
+        if (!result.valid) {
+          process.exit(1);
+        }
+      } catch (error) {
+        console.error("Verification failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // reindex-fts: Rebuild FTS index
+  memory
+    .command("reindex-fts")
+    .description("Rebuild the BM25 full-text search index")
+    .action(async () => {
+      try {
+        const status = context.store.getFtsStatus();
+        console.log(`FTS status before: available=${status.available}, lastError=${status.lastError || "none"}`);
+        const result = await context.store.rebuildFtsIndex();
+        if (result.success) {
+          console.log("✅ FTS index rebuilt successfully");
+        } else {
+          console.error("❌ FTS rebuild failed:", result.error);
+          process.exit(1);
+        }
+      } catch (error) {
+        console.error("FTS rebuild error:", error);
+        process.exit(1);
+      }
+    });
+
+  // Judge the RAW stored metadata: parseSmartMetadata backfills missing
+  // levels from the text, which would hide exactly the rows the repair
+  // exists to fix. Accept only a non-null, non-array object: JSON.parse
+  // ("null") and primitives/arrays succeed, so the catch alone cannot
+  // normalize a damaged row, and one bad row must not abort a scan. Shared
+  // by the scan and the locked apply-time recheck so both judge identically.
+  function judgeSummaryLevels(
+    entry: MemoryEntry,
+  ): { reason: string; levels: { l0: string; l1: string; l2: string } } | null {
+    let rawMeta: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(entry.metadata || "{}");
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rawMeta = parsed as Record<string, unknown>;
+      }
+    } catch {
+      rawMeta = {};
+    }
+    const l0 = (typeof rawMeta.l0_abstract === "string" ? rawMeta.l0_abstract : "").trim();
+    const l1 = (typeof rawMeta.l1_overview === "string" ? rawMeta.l1_overview : "").trim();
+    const l2 = (typeof rawMeta.l2_content === "string" ? rawMeta.l2_content : "").trim();
+
+    if (!l0 || !l1 || !l2) {
+      return { reason: "missing summary level(s)", levels: { l0, l1, l2 } };
+    }
+    if (l0 === l1 && l1 === l2) {
+      // Legacy parse-fallback signature: all three levels collapsed to one
+      // identical string. A generated set always differs by level.
+      return { reason: "degenerate identical levels", levels: { l0, l1, l2 } };
+    }
+    return null;
+  }
+
+  // repair-summaries: report memories whose L0/L1/L2 summaries are missing or
+  // degenerate; --apply fills them with the truncation fallback. Detection is
+  // limited to mechanically reliable shapes: a healthy generated L0 is a
+  // concise abstract that legitimately differs from the raw text, so
+  // text-vs-L0 prefix comparison cannot distinguish stale from generated and
+  // is deliberately not used.
+  memory
+    .command("repair-summaries")
+    .description("Report memories with missing or degenerate L0/L1/L2 summaries; --apply fills them from the source text (default is report-only)")
+    .option("--scope <scope>", "Filter by scope (e.g. agent:assistant)")
+    .option("--apply", "Write the repairs (without this flag the command only reports)", false)
+    .option("--dry-run", "Deprecated: report-only is already the default", false)
+    .action(async (options: { scope?: string; apply: boolean; dryRun: boolean }) => {
+      try {
+        const scopeFilter = options.scope ? [options.scope] : undefined;
+
+        // Paginate through all entries
+        const allEntries: MemoryEntry[] = [];
+        const pageSize = 200;
+        let offset = 0;
+        while (true) {
+          const page = await context.store.list(scopeFilter, undefined, pageSize, offset);
+          if (page.length === 0) break;
+          allEntries.push(...page);
+          offset += page.length;
+          if (page.length < pageSize) break;
+        }
+
+        console.log(`Scanned ${allEntries.length} memories${options.scope ? ` (scope: ${options.scope})` : ""}\n`);
+
+        const staleEntries: Array<{
+          entry: MemoryEntry;
+          reason: string;
+          levels: { l0: string; l1: string; l2: string };
+        }> = [];
+
+        for (const entry of allEntries) {
+          // Current reflection rows (memory-reflection / -event / -item /
+          // -mapped types and category "reflection") intentionally omit
+          // L0/L1/L2; the upgrader excludes them with this same predicate.
+          // Repairing them would rewrite valid reflection metadata with
+          // truncation fallbacks.
+          if (isCurrentReflectionMemory(entry)) {
+            continue;
+          }
+          const verdict = judgeSummaryLevels(entry);
+          if (verdict) {
+            staleEntries.push({ entry, reason: verdict.reason, levels: verdict.levels });
+          }
+        }
+
+        if (staleEntries.length === 0) {
+          console.log("No repairable summaries found (no missing or degenerate L0/L1/L2).");
+          return;
+        }
+
+        console.log(`Found ${staleEntries.length} repairable entries:\n`);
+
+        for (const { entry, reason } of staleEntries) {
+          console.log(`  [${entry.id.slice(0, 8)}] scope=${entry.scope} (${reason})`);
+          console.log(`    text: "${entry.text.slice(0, 60).trim()}..."`);
+        }
+
+        if (!options.apply || options.dryRun) {
+          console.log(`\nReport only — no data was modified. Re-run with --apply to fill ${staleEntries.length} entr${staleEntries.length === 1 ? "y" : "ies"} from source text.`);
+          return;
+        }
+
+        // Apply repairs atomically per row: the store re-reads the CURRENT
+        // row under its write lock and merges only the summary fields, so a
+        // gateway update landing between scan and apply (access counters,
+        // lifecycle state, relations) survives instead of being reverted by
+        // a document rebuilt from the scan snapshot.
+        let repaired = 0;
+        let skipped = 0;
+        let failed = 0;
+
+        for (const { entry } of staleEntries) {
+          try {
+            const result = await context.store.transformMetadata(entry.id, (current) => {
+              // Re-judge on the fresh row: it may have been healed or
+              // rewritten since the scan, and the scan's verdict must not
+              // outlive the state it judged.
+              const verdict = judgeSummaryLevels(current);
+              if (!verdict) {
+                return null;
+              }
+              // A degenerate set (all three collapsed to one string) is
+              // replaced whole; otherwise fill ONLY the missing levels so
+              // valid generated summaries survive the repair.
+              const replaceAll = verdict.reason === "degenerate identical levels";
+              return {
+                l0_abstract: replaceAll ? current.text : verdict.levels.l0 || current.text,
+                l1_overview: replaceAll ? `- ${current.text}` : verdict.levels.l1 || `- ${current.text}`,
+                l2_content: replaceAll ? current.text : verdict.levels.l2 || current.text,
+              };
+            }, scopeFilter);
+            if (result.outcome === "updated") {
+              repaired++;
+            } else if (result.outcome === "unchanged") {
+              skipped++;
+              console.log(`  Skipped ${entry.id.slice(0, 8)}: healthy at apply time (repaired concurrently)`);
+            } else {
+              failed++;
+              console.error(`  Failed to repair ${entry.id.slice(0, 8)}: update returned no entry (row missing or outside the scope filter)`);
+            }
+          } catch (err) {
+            failed++;
+            console.error(`  Failed to repair ${entry.id.slice(0, 8)}: ${err}`);
+          }
+        }
+
+        console.log(`\nRepair complete: ${repaired} fixed, ${failed} failed${skipped > 0 ? `, ${skipped} skipped (healthy at apply time)` : ""} out of ${staleEntries.length} repairable.`);
+        if (failed > 0) {
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        console.error("repair-summaries failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // repair-scopes: migration path for legacy NULL/blank-scope rows that the
+  // scope hardening makes invisible to every scoped reader. Must attach to
+  // the `memory` group: the host routes only `memory-pro <sub>`, so a command
+  // chained off the root program is unreachable in production.
+  memory
+    .command("repair-scopes")
+    .description("Detect legacy NULL/blank-scope rows (invisible to scoped readers) and reassign them to an explicit scope")
+    .option("--target-scope <scope>", "Scope assigned to legacy rows on --apply", "global")
+    .option("--allow-new-scope", "Allow a --target-scope that is not globally defined in scope config (built-in patterns like agent:<id> for an id this config has never seen)", false)
+    .option("--apply", "Apply the reassignment (default: report only)", false)
+    .action(async (options: { targetScope: string; allowNewScope: boolean; apply: boolean }) => {
+      try {
+        // Validate through the normal scope validator up front: a typo here
+        // would strand every repaired row in a scope no reader resolves,
+        // recreating the invisibility this command exists to fix.
+        const targetScope = String(options.targetScope ?? "").trim();
+        if (!context.scopeManager.validateScope(targetScope)) {
+          console.error(
+            `repair-scopes: invalid --target-scope "${options.targetScope}": not a defined scope or built-in pattern ` +
+            "(global, agent:<id>, custom:<name>, project:<id>, user:<id>, reflection:agent:<id>). " +
+            "Rows assigned to an unknown scope would be unreachable to every reader.",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        // Format validation alone cannot catch a well-formed typo: "agent:mian"
+        // matches the agent:<id> built-in pattern, yet reassigned rows would
+        // sit in a scope no configured reader resolves AND stop being
+        // discoverable as legacy. Novel scopes need explicit intent.
+        const knownScopes = new Set(["global", ...context.scopeManager.getAllScopes()]);
+        if (!knownScopes.has(targetScope) && !options.allowNewScope) {
+          console.error(
+            `repair-scopes: --target-scope "${targetScope}" is well-formed but not defined in scope config. ` +
+            "A typo here would strand every repaired row in a scope no reader resolves, and the rows would no longer be discoverable as legacy. " +
+            "Pass --allow-new-scope to confirm this scope is intended.",
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const legacy = await context.store.findLegacyScopeRows(100000);
+        console.log(`Found ${legacy.length} legacy row(s) with NULL/blank scope${legacy.length > 0 ? ":" : "."}`);
+        for (const entry of legacy.slice(0, 20)) {
+          console.log(`  ${String(entry.id).slice(0, 8)}  ${String(entry.text).slice(0, 60)}`);
+        }
+        if (legacy.length > 20) {
+          console.log(`  ... and ${legacy.length - 20} more`);
+        }
+        if (!options.apply) {
+          if (legacy.length > 0) {
+            console.log(`\nReport-only mode. Re-run with --apply to assign scope "${targetScope}".`);
+          }
+          return;
+        }
+        const { repaired, failed, skipped, unrecovered } = await context.store.repairLegacyScopes(targetScope);
+        console.log(`\nRepair complete: ${repaired} reassigned to "${targetScope}", ${skipped} skipped (changed or removed since discovery), ${failed} failed.`);
+        if (unrecovered.length > 0) {
+          // Full rows (text, metadata, vectors) go to a recovery file next to
+          // the db, not to stderr; stderr gets a bounded summary. The full
+          // stderr dump remains only as the fallback when the file cannot be
+          // written, so the data is never lost either way.
+          const dbPathForRecovery = typeof context.store.dbPath === "string" && context.store.dbPath.trim() !== ""
+            ? context.store.dbPath
+            : null;
+          let savedTo: string | null = null;
+          if (dbPathForRecovery) {
+            const recoveryPath = `${dbPathForRecovery.replace(/[\\/]+$/, "")}-unrecovered-${Date.now()}.json`;
+            try {
+              await writeFile(recoveryPath, JSON.stringify(unrecovered, null, 2), "utf8");
+              savedTo = recoveryPath;
+            } catch {
+              savedTo = null;
+            }
+          }
+          if (savedTo) {
+            console.error(
+              `\n${unrecovered.length} row(s) could not be restored after a failed replacement write. ` +
+              `Full row content saved to ${savedTo}; summary:`,
+            );
+            for (const entry of unrecovered.slice(0, 20)) {
+              console.error(`  ${String(entry.id).slice(0, 8)}  scope=${entry.scope ?? "NULL"}  ${String(entry.text).replace(/\s+/g, " ").slice(0, 60)}`);
+            }
+            if (unrecovered.length > 20) {
+              console.error(`  ... and ${unrecovered.length - 20} more (all in the recovery file)`);
+            }
+          } else {
+            console.error(
+              `\n${unrecovered.length} row(s) could not be restored after a failed replacement write, ` +
+              "and the recovery file could not be written. Full row content follows (JSON, one per line) so the data is not lost:",
+            );
+            for (const entry of unrecovered) {
+              console.error(JSON.stringify(entry));
+            }
+          }
+        }
+        if (failed > 0 || unrecovered.length > 0) {
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        console.error("repair-scopes failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // consolidate: reconcile duplicate/contradictory rows already in the store
+  registerConsolidateCommand(memory, context);
+}
+
+// ============================================================================
+// Factory Function
+// ============================================================================
+
+/**
+ * Item 7: the real confirm implementation wired to a real CLI invocation.
+ * Fails closed -- non-interactive (either stream not a TTY) resolves false
+ * without ever reading anything, so a scripted/piped invocation without
+ * --yes aborts cleanly instead of hanging on stdin or silently proceeding.
+ * Streams are injectable so tests can drive both branches deterministically.
+ */
+export function createConsolidateConfirm(streams?: {
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
+  stdout?: NodeJS.WritableStream & { isTTY?: boolean };
+}): (promptText: string) => Promise<boolean> {
+  const stdin = streams?.stdin ?? process.stdin;
+  const stdout = streams?.stdout ?? process.stdout;
+
+  return async (promptText: string): Promise<boolean> => {
+    if (!stdin.isTTY || !stdout.isTTY) {
+      return false;
+    }
+    const rl = readline.createInterface({ input: stdin as NodeJS.ReadableStream, output: stdout as NodeJS.WritableStream });
+    try {
+      const answer = await new Promise<string>((resolve) => rl.question(promptText, resolve));
+      return answer.trim() === "YES";
+    } finally {
+      rl.close();
+    }
+  };
+}
+
+/** Item 8: renders the full plan (verdict, member ids, survivor, exact merge content) for user review before the apply prompt. */
+function registerConsolidateCommand(memory: Command, context: CLIContext) {
+  memory
+    .command("consolidate")
+    .description("Reconcile duplicate or contradictory memories already in the store across write lanes (dry-run by default)")
+    .requiredOption("--agent <agentId>", "Agent whose memory to consolidate (scope agent:<agentId>; journal-mirror writes route to this agent's workspace)")
+    .option("--category <category>", "Limit to one smart category (profile|preferences|entities|events|cases|patterns)")
+    .option("--since <iso>", "Only consider rows stored at or after this ISO timestamp")
+    .option("--apply", "Apply the consolidation plan immediately and record settled clusters (default is a dry-run preview with an interactive apply prompt; a dry-run never writes the store or the settled ledger); exits with status 1 when any cluster failed or was only partially applied", false)
+    .option("--yes", "Skip the LLM-cost confirmation prompt. Automation needs BOTH --yes and --apply: without --apply a non-interactive run pays for a plan it can never apply", false)
+    .option("--include-reflection-slices", "Include reflection writer-2 slice rows in the scan (excluded by default)", false)
+    .option("--scan-limit <n>", `Maximum rows to scan before clustering (default ${DEFAULT_SCAN_LIMIT}; clustering is O(n^2), raise deliberately)`)
+    .action(async (options: {
+      category?: string;
+      since?: string;
+      apply: boolean;
+      yes: boolean;
+      includeReflectionSlices: boolean;
+      agent: string;
+      scanLimit?: string;
+    }) => {
+      try {
+        if (!context.llmClient) {
+          console.error("consolidate: no LLM client configured, cannot make consolidation decisions");
+          process.exit(1);
+        }
+        if (!context.embedder) {
+          console.error("consolidate: no embedder configured, cannot re-embed merged rows");
+          process.exit(1);
+        }
+        const llmClient = context.llmClient;
+        const embedder = context.embedder;
+
+        let sinceMs: number | undefined;
+        if (options.since) {
+          const parsed = Date.parse(options.since);
+          if (Number.isNaN(parsed)) {
+            console.error(`consolidate: invalid --since timestamp "${options.since}"`);
+            process.exit(1);
+          }
+          sinceMs = parsed;
+        }
+
+        let scanLimit: number | undefined;
+        if (options.scanLimit !== undefined) {
+          scanLimit = Number.parseInt(options.scanLimit, 10);
+          if (!Number.isInteger(scanLimit) || scanLimit < 1) {
+            console.error(`consolidate: invalid --scan-limit "${options.scanLimit}" (positive integer required)`);
+            process.exit(1);
+          }
+        }
+
+        const mdMirror = context.mdMirror;
+        const confirm = createConsolidateConfirm();
+        const scope = `agent:${options.agent}`;
+        const settledLedgerPath =
+          typeof context.store.dbPath === "string" && context.store.dbPath.length > 0
+            ? path.join(context.store.dbPath, "consolidate-settled.json")
+            : undefined;
+        const settledLedger = settledLedgerPath ? await loadConsolidateSettledLedger(settledLedgerPath) : {};
+
+        const result = await runConsolidate(
+          {
+            fetchRows: (scopeFilter, maxTimestamp, limit) =>
+              // Live-only is this feature's explicit choice, not a store-wide
+              // default: consolidate must never cluster already-dead rows.
+              context.store.fetchForCompaction(maxTimestamp, scopeFilter, limit, { excludeInactive: true }),
+            update: (id, patch, scopeFilter) => context.store.update(id, patch, scopeFilter),
+            getById: (id, scopeFilter) => context.store.getById(id, scopeFilter),
+            embed: (text) => embedder.embedPassage(text),
+            completeJson: (prompt, label, system, temperature) => llmClient.completeJson(prompt, label, system, temperature),
+            log: (message) => console.warn(message),
+            confirmCost: async (message) => {
+              console.log(`\n${message}`);
+              return confirm("Proceed with these LLM calls? Type YES to continue: ");
+            },
+            confirmApply: async (message, clusters) => {
+              console.log(`\n${formatConsolidatePlanForDisplay(clusters)}`);
+              console.log(`\n${message}`);
+              return confirm("Type YES to apply: ");
+            },
+            onAudit: mdMirror
+              ? async (audit) => {
+                  const summary = `${audit.action} survivor=${audit.survivorId.slice(0, 8)} absorbed=${audit.absorbedIds.map((id) => id.slice(0, 8)).join(",")} reason="${audit.reason}"`;
+                  await mdMirror(
+                    { text: summary, category: "consolidation", scope: audit.scope, timestamp: Date.now() },
+                    { source: `memory-consolidate:${audit.action}`, agentId: options.agent },
+                  );
+                }
+              : undefined,
+          },
+          {
+            scope,
+            category: options.category as import("./src/memory-categories.js").MemoryCategory | undefined,
+            sinceMs,
+            includeReflectionSlices: options.includeReflectionSlices,
+            apply: options.apply === true,
+            autoConfirm: options.yes === true,
+            settledFingerprints: new Set((settledLedger[scope] ?? []).map((e) => e.fp)),
+            scanLimit,
+          },
+        );
+
+        if (result.status === "aborted") {
+          const declined = (result.abortReason ?? "").includes("cost gate declined");
+          if (declined) {
+            console.log(`consolidate: cancelled at the cost gate — no LLM calls were made.`);
+            console.log(`Pass --yes to skip this prompt (automation: --yes together with --apply).`);
+          } else {
+            console.error(`consolidate: aborted -- ${result.abortReason}`);
+            if (result.costPreview) {
+              console.error(formatConsolidateCostPreview(result.costPreview));
+            }
+            console.error(`Pass --yes to skip this prompt (automation: --yes together with --apply), or re-run interactively and type YES.`);
+          }
+          process.exit(1);
+        }
+
+        console.log(`Scanned ${pluralCount(result.scanned, "row")}, ${result.eligible} eligible for consolidation.`);
+        const settledNote = result.settledSkipped > 0 ? ` (${result.settledSkipped} settled in previous runs)` : "";
+        if (result.clusters.length === 0) {
+          console.log(`0 candidates${settledNote} — nothing to consolidate.\n`);
+        } else {
+          console.log(`Decided ${pluralCount(result.clusters.length, "cluster")}${settledNote}:\n`);
+        }
+
+        for (const cluster of result.clusters) {
+          if (cluster.malformed) {
+            const label = cluster.failure === "call-failed" ? "undecided: LLM call failed" : "skipped: malformed verdict";
+            console.log(`  [${label}] ${pluralCount(cluster.memberIds.length, "row")}`);
+            for (const text of cluster.memberTexts) console.log(`    - "${text}"`);
+            continue;
+          }
+          const blockedNote = cluster.blocked === "append-only-shield" ? " — BLOCKED by append-only shield (not applied)" : "";
+          console.log(`  [${cluster.verdict!.verdict}] ${pluralCount(cluster.memberIds.length, "row")} — ${cluster.verdict!.reason}${blockedNote}`);
+          for (const text of cluster.memberTexts) console.log(`    - "${text}"`);
+        }
+
+        if (result.staleSkipped.length > 0) {
+          console.log(`\n${pluralCount(result.staleSkipped.length, "cluster")} skipped: changed since the plan was built (stale).`);
+        }
+
+        // Settlement is durable state, so only a run that COMMITTED (--apply,
+        // or an interactive YES) writes it. A dry-run that judged a cluster
+        // "skip" must not hide that cluster from every later preview and apply.
+        if (result.status === "completed" && result.executed && settledLedgerPath) {
+          await saveConsolidateSettledLedger(settledLedgerPath, scope, result.newlySettled);
+        }
+
+        if (result.scanTruncated) {
+          console.log(`\nNote: the scan stopped at the row limit; rerun with a higher --scan-limit to cover the whole scope.`);
+        }
+
+        if (!result.executed) {
+          if (!options.apply) {
+            console.log(`\nNo changes applied.`);
+          }
+          if (result.newlySettled.length > 0) {
+            console.log(`${pluralCount(result.newlySettled.length, "skip verdict")} not recorded as settled: a dry-run never writes the settled ledger. Rerun with --apply to commit them so later runs skip these clusters.`);
+          }
+          return;
+        }
+
+        const failureNotes: string[] = [];
+        if (result.skippedMalformed > 0) failureNotes.push(`${pluralCount(result.skippedMalformed, "cluster")} skipped due to malformed verdicts`);
+        if (result.undecidedCallFailed > 0) failureNotes.push(`${pluralCount(result.undecidedCallFailed, "cluster")} undecided because the decide call failed`);
+        const partial = result.applied.filter((a) => a.partialFailures?.length);
+        if (partial.length > 0) failureNotes.push(`${pluralCount(partial.length, "cluster")} PARTIALLY applied (failed rows stay active; rerun retries them)`);
+        if (result.applyFailed.length > 0) failureNotes.push(`${pluralCount(result.applyFailed.length, "cluster")} FAILED to apply (nothing written; rerun retries them)`);
+        console.log(`\nApplied ${pluralCount(result.applied.length, "action")}${failureNotes.length ? "; " + failureNotes.join("; ") : ""}.`);
+        for (const cluster of partial) {
+          for (const failure of cluster.partialFailures!) {
+            console.log(`  partial: ${failure.step} ${failure.id.slice(0, 8)} — ${failure.error}`);
+          }
+        }
+        for (const failed of result.applyFailed) {
+          console.log(`  failed: cluster of ${pluralCount(failed.memberIds.length, "row")} (${failed.action}) — ${failed.error}`);
+        }
+        if (partial.length > 0 || result.applyFailed.length > 0) {
+          // An incomplete apply must not look like success to cron, CI, or scripts:
+          // exit non-zero, but via exitCode so the report above is fully flushed.
+          console.error(
+            `consolidate: apply incomplete (${pluralCount(partial.length, "cluster")} partially applied, ${pluralCount(result.applyFailed.length, "cluster")} failed); exiting with status 1.`,
+          );
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        console.error("consolidate failed:", error);
+        process.exit(1);
+      }
+    });
+}
+
+// ============================================================================
+// Factory Function
+// ============================================================================
+
+export function createMemoryCLI(context: CLIContext) {
+  return ({ program }: { program: Command }) => registerMemoryCLI(program, context);
+}

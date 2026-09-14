@@ -1,0 +1,64 @@
+name: 🐛 Bug report
+description: Report reproducible incorrect behavior in Agent Memory
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Agent Memory. Remove tokens, secrets, and personal memory contents before posting logs.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Memory Server / REST
+        - MCP transport
+        - Recall / retrieval quality
+        - Capture / extraction
+        - LanceDB / persistence
+        - Authentication / networking
+        - Claude Code
+        - Codex CLI
+        - Cursor
+        - Gemini CLI
+        - VS Code
+        - OpenClaw adapter
+        - Docker / Coolify
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      placeholder: |
+        1. Start server with ...
+        2. Connect client ...
+        3. Call ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "OS, Node/Docker version, client and version, embedding/LLM provider"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Do not include tokens, API keys, personal memory text, or production secrets.
+      render: shell

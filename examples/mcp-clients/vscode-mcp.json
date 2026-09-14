@@ -1,0 +1,19 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "memory-server-token",
+      "description": "Agent Memory Server bearer token",
+      "password": true
+    }
+  ],
+  "servers": {
+    "agentMemory": {
+      "type": "http",
+      "url": "http://127.0.0.1:7337/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:memory-server-token}"
+      }
+    }
+  }
+}
