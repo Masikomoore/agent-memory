@@ -120,6 +120,10 @@ The default compose stack uses:
 - persistent volumes for LanceDB and Ollama models
 - loopback-only host publishing by default
 
+The Compose stack bootstraps the two Ollama models with separate one-shot jobs
+before the Memory Server starts, so a fresh deployment cannot become healthy
+until both required models are available.
+
 Then connect an MCP client to:
 
 ```text

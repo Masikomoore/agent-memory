@@ -21,6 +21,7 @@ All notable public Agent Memory changes will be recorded here.
 
 - Added a production Dockerfile.
 - Added self-contained Docker Compose deployment with LanceDB persistence and local Ollama models.
+- Made model bootstrap deterministic across Docker Compose/Coolify by running embedding and extraction-model pulls as separate direct Ollama jobs instead of shell-composed commands.
 - Added Coolify deployment guidance.
 
 ### Project launch
