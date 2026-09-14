@@ -10,7 +10,7 @@ All notable public Agent Memory changes will be recorded here.
 - Expanded the public roadmap with help-wanted areas and a clear path for contributors to influence priorities.
 - Expanded the contributing guide with role-based contribution paths, a suggested PR workflow, and non-code maintenance roles.
 - Added a dedicated real-client verification issue template and routed setup/design questions to GitHub Discussions.
-- Made the Docker/Coolify SmartExtractor model configurable and changed the Compose default to CPU-friendly `qwen2.5:1.5b` with a 180-second timeout so CPU-only deployments do not routinely hit the previous 120-second `qwen2.5:3b` deadline.
+- Removed Docker/Coolify model-name defaults: embedding model, embedding dimension, and SmartExtractor model are now supplied explicitly by the operator through environment variables.
 - Fixed the public CI core-regression job to build `dist/` before running tests that import the compiled runtime.
 
 ## 0.1.0 - Initial public release

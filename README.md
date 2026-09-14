@@ -131,8 +131,8 @@ curl http://127.0.0.1:7337/health
 
 The default compose stack uses:
 
-- `nomic-embed-text` for embeddings
-- `qwen2.5:1.5b` for SmartExtractor (CPU-friendly default; override with `MEMORY_LLM_MODEL`)
+- your configured embedding model
+- your configured SmartExtractor model
 - persistent volumes for LanceDB and Ollama models
 - loopback-only host publishing by default
 

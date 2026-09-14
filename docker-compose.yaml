@@ -23,11 +23,11 @@ services:
       MEMORY_SERVER_DEFAULT_WRITE_SCOPE: global
       MEMORY_CAPTURE_ENABLED: "true"
       MEMORY_EMBEDDING_BASE_URL: http://ollama:11434/v1
-      MEMORY_EMBEDDING_MODEL: nomic-embed-text
-      MEMORY_EMBEDDING_DIMENSIONS: "768"
-      MEMORY_EMBEDDING_TIMEOUT_MS: "60000"
+      MEMORY_EMBEDDING_MODEL: "${MEMORY_EMBEDDING_MODEL:?set MEMORY_EMBEDDING_MODEL}"
+      MEMORY_EMBEDDING_DIMENSIONS: "${MEMORY_EMBEDDING_DIMENSIONS:?set MEMORY_EMBEDDING_DIMENSIONS}"
+      MEMORY_EMBEDDING_TIMEOUT_MS: "${MEMORY_EMBEDDING_TIMEOUT_MS:-60000}"
       MEMORY_LLM_BASE_URL: http://ollama:11434/v1
-      MEMORY_LLM_MODEL: "${MEMORY_LLM_MODEL:-qwen2.5:1.5b}"
+      MEMORY_LLM_MODEL: "${MEMORY_LLM_MODEL:?set MEMORY_LLM_MODEL}"
       MEMORY_LLM_TIMEOUT_MS: "${MEMORY_LLM_TIMEOUT_MS:-180000}"
     volumes:
       - agent-memory-data:/app/data
@@ -62,7 +62,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/ollama"]
-    command: ["pull", "nomic-embed-text"]
+    command: ["pull", "${MEMORY_EMBEDDING_MODEL:?set MEMORY_EMBEDDING_MODEL}"]
 
   ollama-init-llm:
     image: ollama/ollama:0.34.0
@@ -73,7 +73,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/ollama"]
-    command: ["pull", "${MEMORY_LLM_MODEL:-qwen2.5:1.5b}"]
+    command: ["pull", "${MEMORY_LLM_MODEL:?set MEMORY_LLM_MODEL}"]
 
 volumes:
   agent-memory-data:
