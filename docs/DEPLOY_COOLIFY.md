@@ -4,7 +4,7 @@ Agent Memory can be managed from Coolify as a Docker Compose application/service
 
 ## Recommended source
 
-Use this Git repository as the source and deploy the root `docker-compose.yaml`. The repository builds the Memory Server from `Dockerfile` and runs Ollama as a companion service.
+Use this Git repository as the source and deploy the root `docker-compose.yaml`. The default deployment runs only the Memory Server and connects to operator-supplied embedding and LLM providers.
 
 ## Required configuration
 
@@ -12,8 +12,12 @@ Set at least:
 
 ```text
 MEMORY_SERVER_TOKEN=<long random secret>
+MEMORY_EMBEDDING_BASE_URL=<OpenAI-compatible embedding base URL>
+MEMORY_EMBEDDING_API_KEY=<provider key, blank if the provider does not require one>
 MEMORY_EMBEDDING_MODEL=<your embedding model>
 MEMORY_EMBEDDING_DIMENSIONS=<that model's vector dimension>
+MEMORY_LLM_BASE_URL=<OpenAI-compatible LLM base URL>
+MEMORY_LLM_API_KEY=<provider key>
 MEMORY_LLM_MODEL=<your extraction model>
 ```
 
@@ -28,17 +32,24 @@ MEMORY_SERVER_ALLOWED_ORIGINS=<same-hosts-as-needed>
 Prefer a VPN/private network or TLS reverse proxy. Do not expose the raw service unauthenticated.
 
 The Compose file deliberately does not choose model names for you. Configure
-the embedding model, its vector dimension, and the SmartExtractor model in
-Coolify. The Ollama bootstrap jobs pull exactly those configured model names
-before the Memory Server starts. Timeouts remain independently tunable through
-`MEMORY_EMBEDDING_TIMEOUT_MS` and `MEMORY_LLM_TIMEOUT_MS`.
+provider URLs, credentials, the embedding dimension, and model names in
+Coolify. `MEMORY_LLM_THINK_LEVEL` is optional; when blank, Agent Memory does
+not send an explicit reasoning effort and leaves that choice to the provider.
+Timeouts remain independently tunable through `MEMORY_EMBEDDING_TIMEOUT_MS`
+and `MEMORY_LLM_TIMEOUT_MS`.
+
+For an all-local Ollama stack, layer `docker-compose.ollama.yaml` on top of the
+base file. That optional overlay starts Ollama and pulls the operator-selected
+embedding and LLM models.
 
 ## Persistent data
 
-The compose stack declares two persistent volumes:
+The default compose stack declares one persistent volume:
 
 - `agent-memory-data` — LanceDB database
-- `ollama-models` — local model cache
+
+The optional local-Ollama overlay additionally declares `ollama-models` for
+the local model cache.
 
 Back up `agent-memory-data` as sensitive user data.
 

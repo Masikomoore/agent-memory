@@ -112,7 +112,7 @@ The important boundary is the server: clients never open their own competing dat
 
 ## Quick Start
 
-### Option 1 — Docker + local Ollama
+### Option 1 — Docker + your providers
 
 Requirements: Docker Compose and an x86_64/arm64 host supported by LanceDB.
 
@@ -131,14 +131,19 @@ curl http://127.0.0.1:7337/health
 
 The default compose stack uses:
 
-- your configured embedding model
-- your configured SmartExtractor model
-- persistent volumes for LanceDB and Ollama models
+- your configured OpenAI-compatible embedding provider
+- your configured OpenAI-compatible SmartExtractor LLM provider
+- a persistent volume for LanceDB
 - loopback-only host publishing by default
 
-The Compose stack bootstraps the two Ollama models with separate one-shot jobs
-before the Memory Server starts, so a fresh deployment cannot become healthy
-until both required models are available.
+If you prefer an all-local Ollama stack, use the optional overlay:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.ollama.yaml up -d
+```
+
+Model names are still operator-selected; the overlay only supplies and
+bootstraps the local Ollama runtime.
 
 Then connect an MCP client to:
 

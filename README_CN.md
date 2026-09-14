@@ -77,13 +77,15 @@ docker compose up -d
 curl http://127.0.0.1:7337/health
 ```
 
-默认 Docker Compose 会同时运行：
+默认 Docker Compose 运行：
 
 - Agent Memory Server
-- 你自行配置的 Embedding 模型
-- 你自行配置的 SmartExtractor 模型
+- 你自行配置的 OpenAI-compatible Embedding Provider
+- 你自行配置的 OpenAI-compatible LLM Provider
 - LanceDB 持久卷
-- Ollama 模型持久卷
+
+如果希望所有模型都在本机 Ollama 运行，可以叠加
+`docker-compose.ollama.yaml`；模型名仍由你自行选择，仓库不替你指定。
 
 MCP 地址：
 

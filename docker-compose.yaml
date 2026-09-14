@@ -4,11 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    depends_on:
-      ollama-init-embed:
-        condition: service_completed_successfully
-      ollama-init-llm:
-        condition: service_completed_successfully
     ports:
       - "${MEMORY_SERVER_BIND_ADDRESS:-127.0.0.1}:7337:7337"
     environment:
@@ -22,13 +17,16 @@ services:
       MEMORY_SERVER_DEFAULT_AGENT: main
       MEMORY_SERVER_DEFAULT_WRITE_SCOPE: global
       MEMORY_CAPTURE_ENABLED: "true"
-      MEMORY_EMBEDDING_BASE_URL: http://ollama:11434/v1
+      MEMORY_EMBEDDING_BASE_URL: "${MEMORY_EMBEDDING_BASE_URL:-http://ollama:11434/v1}"
+      MEMORY_EMBEDDING_API_KEY: "${MEMORY_EMBEDDING_API_KEY:-}"
       MEMORY_EMBEDDING_MODEL: "${MEMORY_EMBEDDING_MODEL:?set MEMORY_EMBEDDING_MODEL}"
       MEMORY_EMBEDDING_DIMENSIONS: "${MEMORY_EMBEDDING_DIMENSIONS:?set MEMORY_EMBEDDING_DIMENSIONS}"
       MEMORY_EMBEDDING_TIMEOUT_MS: "${MEMORY_EMBEDDING_TIMEOUT_MS:-60000}"
-      MEMORY_LLM_BASE_URL: http://ollama:11434/v1
+      MEMORY_LLM_BASE_URL: "${MEMORY_LLM_BASE_URL:-http://ollama:11434/v1}"
+      MEMORY_LLM_API_KEY: "${MEMORY_LLM_API_KEY:-}"
       MEMORY_LLM_MODEL: "${MEMORY_LLM_MODEL:?set MEMORY_LLM_MODEL}"
       MEMORY_LLM_TIMEOUT_MS: "${MEMORY_LLM_TIMEOUT_MS:-180000}"
+      MEMORY_LLM_THINK_LEVEL: "${MEMORY_LLM_THINK_LEVEL:-}"
     volumes:
       - agent-memory-data:/app/data
     healthcheck:
@@ -38,43 +36,5 @@ services:
       retries: 6
       start_period: 20s
 
-  ollama:
-    image: ollama/ollama:0.34.0
-    restart: unless-stopped
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      OLLAMA_KEEP_ALIVE: 10m
-    volumes:
-      - ollama-models:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "OLLAMA_HOST=http://127.0.0.1:11434 ollama list >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
-
-  ollama-init-embed:
-    image: ollama/ollama:0.34.0
-    restart: "no"
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/ollama"]
-    command: ["pull", "${MEMORY_EMBEDDING_MODEL:?set MEMORY_EMBEDDING_MODEL}"]
-
-  ollama-init-llm:
-    image: ollama/ollama:0.34.0
-    restart: "no"
-    depends_on:
-      ollama-init-embed:
-        condition: service_completed_successfully
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/ollama"]
-    command: ["pull", "${MEMORY_LLM_MODEL:?set MEMORY_LLM_MODEL}"]
-
 volumes:
   agent-memory-data:
-  ollama-models:

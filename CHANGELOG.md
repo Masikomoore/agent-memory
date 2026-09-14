@@ -10,7 +10,7 @@ All notable public Agent Memory changes will be recorded here.
 - Expanded the public roadmap with help-wanted areas and a clear path for contributors to influence priorities.
 - Expanded the contributing guide with role-based contribution paths, a suggested PR workflow, and non-code maintenance roles.
 - Added a dedicated real-client verification issue template and routed setup/design questions to GitHub Discussions.
-- Removed Docker/Coolify model-name defaults: embedding model, embedding dimension, and SmartExtractor model are now supplied explicitly by the operator through environment variables.
+- Removed Docker/Coolify model-name defaults and decoupled the default Compose deployment from bundled Ollama: provider URLs, credentials, embedding dimensions, and SmartExtractor model are now operator-supplied, with local Ollama available as an optional overlay.
 - Fixed the public CI core-regression job to build `dist/` before running tests that import the compiled runtime.
 
 ## 0.1.0 - Initial public release
