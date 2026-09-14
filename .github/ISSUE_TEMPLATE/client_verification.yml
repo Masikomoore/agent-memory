@@ -1,0 +1,67 @@
+name: 🔌 Client verification
+description: Verify Agent Memory with an MCP-capable agent, CLI, IDE, or assistant
+labels: ["help wanted", "integration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-client verification is one of the most useful ways to help Agent Memory. Please use a harmless test memory and remove tokens, secrets, and personal memory contents from logs.
+
+  - type: input
+    id: client
+    attributes:
+      label: Client
+      description: Agent, CLI, IDE, extension, or MCP host you tested.
+      placeholder: "e.g. Cursor 1.x, Gemini CLI, VS Code Copilot, Zed"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Client version
+      placeholder: "Exact version if available"
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - Streamable HTTP MCP
+        - REST
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Sanitized configuration
+      description: Show the relevant client configuration with tokens and private addresses removed.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: What worked?
+      options:
+        - label: Client connected to the Agent Memory server
+        - label: `memory_recall` was discoverable/callable
+        - label: `memory_capture` was discoverable/callable
+        - label: A memory captured by this client could be recalled
+        - label: A memory captured by another client could be recalled
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes, errors, or documentation gaps
+      description: Include enough detail for another contributor to reproduce the result.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Follow-up
+      options:
+        - label: I am willing to submit or update a client configuration recipe based on this test.

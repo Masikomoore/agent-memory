@@ -6,11 +6,14 @@
 
 **为 Claude Code、Codex CLI、Cursor、Gemini CLI、VS Code Agent、OpenClaw 以及任何 MCP 客户端提供可自托管的长期共享记忆层。**
 
-[English](README.md) · [快速开始](#快速开始) · [客户端接入](docs/AGENT_CLIENTS.md) · [路线图](ROADMAP.md) · [参与贡献](CONTRIBUTING.md)
+[English](README.md) · [快速开始](#快速开始) · [客户端接入](docs/AGENT_CLIENTS.md) · [路线图](ROADMAP.md) · [参与贡献](CONTRIBUTING.md) · [Discussions](https://github.com/Masikomoore/agent-memory/discussions)
 
 </div>
 
 ---
+
+> [!TIP]
+> **如果你平时会切换两个以上的 AI Agent，这个项目就是为你准备的。** 如果你希望长期记忆属于自己，而不是被某个 IDE、模型或厂商锁定，欢迎先点一个 ⭐ Star，跟着项目一起成长。
 
 ## Agent 不应该各自失忆
 
@@ -28,6 +31,18 @@ OpenClaw ────┘
 ```
 
 **Agent 只是客户端；Memory Server 才是长期记忆的唯一权威来源。**
+
+### 30 秒理解 Agent Memory
+
+| 现在 | 使用 Agent Memory 之后 |
+|---|---|
+| 每个 Agent 都有不同的上下文 | 所有 Agent 从同一权威记忆层召回 |
+| 重要决定散落在聊天记录里 | 长期事实自动提取成可检索记忆 |
+| 换工具就要重新解释项目 | Claude Code、Codex、Cursor 等可以共享 |
+| 记忆绑定某个插件或厂商 | 记忆运行在你自己的 MCP / REST 服务里 |
+| 一味“全记住”最终越来越吵 | 衰减、强化、去重、分层和 Scope 管理生命周期 |
+
+现阶段最适合：已经同时使用多个 AI Agent、偏好自托管，并且不想为了长期记忆额外维护知识图谱的开发者和小团队。
 
 ## 它解决什么问题？
 
@@ -91,6 +106,17 @@ http://127.0.0.1:7337/mcp
 当前仍处于 Alpha 阶段。特别欢迎大家参与客户端适配、管理 UI、多用户权限、备份恢复、部署模板、指标监控和记忆质量评测。
 
 完整计划见 [ROADMAP.md](ROADMAP.md)，贡献说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+### 现在最欢迎的贡献
+
+- 验证 Cursor、Gemini CLI、VS Code 或其他 MCP 客户端的真实接入
+- 完善备份恢复、诊断、监控、Docker、NAS、Coolify 部署流程
+- 用小型测试用例复现一次“不该记住 / 没召回到 / 召回错了”的问题
+- 改进身份认证、ACL、Token 轮换和远程部署安全
+- 做一个轻量的记忆查看 / 搜索 / 管理界面
+- 把某一条安装路径写到第一次使用的人也能一次成功
+
+可以直接查看 [`good first issue`](https://github.com/Masikomoore/agent-memory/labels/good%20first%20issue) 和 [`help wanted`](https://github.com/Masikomoore/agent-memory/labels/help%20wanted)，较大的设计建议可以先到 [Discussions](https://github.com/Masikomoore/agent-memory/discussions) 讨论。
 
 ## 开源原则
 

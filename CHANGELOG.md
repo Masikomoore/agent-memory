@@ -2,6 +2,15 @@
 
 All notable public Agent Memory changes will be recorded here.
 
+## Unreleased
+
+### Community launch polish
+
+- Strengthened the README around the core cross-agent value proposition, 30-second project summary, contributor entry points, and community ownership.
+- Expanded the public roadmap with help-wanted areas and a clear path for contributors to influence priorities.
+- Expanded the contributing guide with role-based contribution paths, a suggested PR workflow, and non-code maintenance roles.
+- Added a dedicated real-client verification issue template and routed setup/design questions to GitHub Discussions.
+
 ## 0.1.0 - Initial public release
 
 ### Shared memory server

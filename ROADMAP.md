@@ -2,6 +2,8 @@
 
 Agent Memory is being built as a vendor-neutral, self-hosted memory plane for personal AI agents.
 
+This roadmap is intentionally public and contribution-driven. Items marked **Help wanted** are good places to join without needing to redesign the whole system. If you want to own one, open or comment on an issue so work is not duplicated.
+
 ## Now — make shared memory dependable
 
 - [x] Host-independent Memory Core
@@ -16,6 +18,8 @@ Agent Memory is being built as a vendor-neutral, self-hosted memory plane for pe
 - [ ] Add backup/restore runbook for the standalone server
 - [ ] Add memory delete/forget endpoint with audit-safe semantics
 
+**Help wanted now:** real-client verification, backup/restore documentation, deployment reproducibility.
+
 ## Next — make it pleasant to operate
 
 - [ ] Web UI for inspection, search, correction, and lifecycle visibility
@@ -25,6 +29,8 @@ Agent Memory is being built as a vendor-neutral, self-hosted memory plane for pe
 - [ ] Easier provider setup and model diagnostics
 - [ ] Container images and versioned release artifacts
 - [ ] Upgrade/migration story independent of OpenClaw
+
+**Help wanted:** web UI prototypes, metrics/diagnostics, release automation, operator docs.
 
 ## Then — make it safe for multiple users and agents
 
@@ -36,6 +42,8 @@ Agent Memory is being built as a vendor-neutral, self-hosted memory plane for pe
 - [ ] Token rotation
 - [ ] Optional TLS termination guidance / private-network profiles
 
+**Design-heavy / help wanted:** identity model, ACL boundaries, token rotation, tenant isolation.
+
 ## Memory quality
 
 - [ ] Public evaluation harness for recall quality
@@ -45,6 +53,8 @@ Agent Memory is being built as a vendor-neutral, self-hosted memory plane for pe
 - [ ] Memory confidence and provenance surfaces
 - [ ] Safer automatic correction and contradiction handling
 
+**Help wanted:** small reproducible evaluation cases are especially valuable. A failing fixture with a clear expected result is more useful than a broad "memory quality is bad" report.
+
 ## Ecosystem
 
 - [ ] More verified MCP clients
@@ -53,6 +63,27 @@ Agent Memory is being built as a vendor-neutral, self-hosted memory plane for pe
 - [ ] Home Assistant / automation examples
 - [ ] SDKs for common languages
 - [ ] Importers from common memory/chat formats
+
+**Help wanted:** verify a real client, add a reproducible integration recipe, or contribute an importer with tests.
+
+## Community ownership
+
+Agent Memory is intended to become community-maintained as usage grows. Useful non-code ownership includes:
+
+- triaging reproducible issues
+- validating agent/client integrations
+- reviewing documentation and deployment recipes
+- maintaining benchmark fixtures
+- helping shape interfaces before large changes land
+
+Consistent contributors who demonstrate good judgment in one of these areas can take on more review and maintenance responsibility over time. The project should not depend on a single maintainer understanding every client and deployment target.
+
+## How to influence the roadmap
+
+1. For a concrete bug or scoped feature, open an Issue.
+2. For a larger interface, architecture, or product-direction idea, start a GitHub Discussion first.
+3. For an item you want to implement, say so on the issue before doing a large amount of work.
+4. Prefer small, independently reviewable steps over one large roadmap PR.
 
 ## Non-goals for now
 

@@ -10,12 +10,16 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-7c3aed)](docs/AGENT_CLIENTS.md)
 [![LanceDB](https://img.shields.io/badge/Storage-LanceDB-f59e0b)](https://lancedb.com/)
+[![GitHub stars](https://img.shields.io/github/stars/Masikomoore/agent-memory?style=flat)](https://github.com/Masikomoore/agent-memory/stargazers)
 
-[Quick Start](#quick-start) · [Connect Agents](docs/AGENT_CLIENTS.md) · [Architecture](#architecture) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [中文](README_CN.md)
+[Quick Start](#quick-start) · [Connect Agents](docs/AGENT_CLIENTS.md) · [Architecture](#architecture) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Discussions](https://github.com/Masikomoore/agent-memory/discussions) · [中文](README_CN.md)
 
 </div>
 
 ---
+
+> [!TIP]
+> **If you use more than one AI coding agent, Agent Memory is for you.** Star the repository if you want an open, self-hosted memory layer that stays with *you* instead of one vendor, IDE, or model.
 
 ## Your agents should not have separate memories
 
@@ -36,6 +40,18 @@ OpenClaw ────┘                            ├─ extraction
 ```
 
 Your agents call the memory service. **The memory service—not a specific IDE or agent—owns the long-term memory.**
+
+### The 30-second version
+
+| Today | With Agent Memory |
+|---|---|
+| Every agent starts with a different history | Agents recall from one authoritative memory plane |
+| Important decisions live in chat transcripts | Durable facts are extracted into retrievable memory |
+| Switching tools means repeating context | Claude Code, Codex, Cursor, Gemini CLI, VS Code, and OpenClaw can share it |
+| Memory is tied to a vendor or local plugin | Memory runs as your own MCP/REST service |
+| "Remember everything" becomes noisy over time | Decay, reinforcement, deduplication, tiers, and scopes manage lifecycle |
+
+**Who should try it now?** Developers and small teams who already switch between multiple AI agents, prefer self-hosting, and want shared memory without maintaining a knowledge graph.
 
 ## Why Agent Memory?
 
@@ -214,6 +230,21 @@ Good areas for contributors right now:
 
 See the full [Roadmap](ROADMAP.md).
 
+### What we want help with right now
+
+You do **not** need to understand the memory engine to contribute. The highest-value community work today is concrete and testable:
+
+| Area | Good contribution |
+|---|---|
+| Agent integrations | Verify Cursor, Gemini CLI, VS Code, or another MCP client against a real server |
+| Operations | Improve backup/restore, diagnostics, metrics, Docker, NAS, or Coolify workflows |
+| Memory quality | Reproduce a bad recall/capture case with a small fixture and expected behavior |
+| Security | Improve client identity, ACLs, token rotation, and safe remote deployment |
+| UX | Prototype a small memory inspection/search/admin interface |
+| Docs | Make one setup path reproducible for someone who has never used the project |
+
+Look for [`good first issue`](https://github.com/Masikomoore/agent-memory/labels/good%20first%20issue) and [`help wanted`](https://github.com/Masikomoore/agent-memory/labels/help%20wanted), or start a [Discussion](https://github.com/Masikomoore/agent-memory/discussions) before a larger design change.
+
 ## Contributing
 
 This project is intentionally being opened early. If the idea of a **personal memory layer that survives agent switching** is useful to you, there are several valuable ways to help:
@@ -226,6 +257,8 @@ This project is intentionally being opened early. If the idea of a **personal me
 - 📖 Fix docs where setup is confusing
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). Small, focused pull requests are welcome.
+
+Consistent contributors are also welcome to help with **issue triage, client verification, documentation review, and roadmap shaping**. The goal is to grow Agent Memory as a community-maintained interoperability layer, not a one-person integration dump.
 
 ## Philosophy
 
