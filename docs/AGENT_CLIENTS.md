@@ -1,6 +1,6 @@
 # Agent Client Integration
 
-The standalone Memory Server is the shared memory authority. Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code agents, and other Streamable HTTP MCP clients should connect directly to the same `/mcp` endpoint. OpenClaw keeps a thin native adapter so its lifecycle hooks can perform automatic recall/capture. Hosts without a suitable native lifecycle integration can use the generic `agent-memory-hook` REST bridge.
+The standalone Memory Server is the shared memory authority. Claude Code, Codex CLI, Cursor, Gemini CLI, Grok Build, ChatOnSteroids, VS Code agents, and other Streamable HTTP MCP clients should connect to the same `/mcp` endpoint. OpenClaw keeps a thin native adapter so its lifecycle hooks can perform automatic recall/capture. Hosts without a suitable native lifecycle integration can use the generic `agent-memory-hook` REST bridge.
 
 All extraction, admission, deduplication, merge/supersede, lifecycle decay, tiering, embedding, and LanceDB access remain on the Memory Server. Clients only transport context and recall queries.
 
@@ -26,6 +26,12 @@ For LAN/WAN use, follow the binding, Host/Origin allowlist, TLS/private-network,
 
 The examples below use the logical MCP server name `agent-memory`. Configuration templates live in [`examples/mcp-clients`](../examples/mcp-clients).
 
+## Let your AI agent do the setup
+
+If you are already inside a capable coding agent, you do not need to translate every client recipe by hand. Copy the ready-made [`agent-install-prompt.md`](../examples/mcp-clients/agent-install-prompt.md) into your agent and let it inspect the machine, preserve existing configuration, deploy or connect the Memory Server, configure the clients it finds, add the shared-memory behavior rules, and verify the real capture/recall path.
+
+The setup prompt deliberately tells the agent to keep credentials out of chat history and repositories, preserve unrelated settings, and finish with functional MCP and cross-client verification instead of stopping after editing config files.
+
 ## Shared agent behavior
 
 MCP configuration only makes the tools available; it does not guarantee that every agent will call them at the right time. Give each client persistent instructions based on [`examples/mcp-clients/agent-memory-instructions.md`](../examples/mcp-clients/agent-memory-instructions.md).
@@ -38,6 +44,8 @@ Use a stable logical `agentId` per client, for example:
 | Codex CLI | `codex` |
 | Cursor | `cursor` |
 | Gemini CLI | `gemini-cli` |
+| Grok Build | `grok` |
+| ChatOnSteroids | `chat-on-steroids` |
 | VS Code agent | `vscode` |
 
 The server remains authoritative for scope ACLs. Leaving `scope` unset uses the normal shared/default scope policy.
@@ -101,6 +109,51 @@ Use [`gemini-settings.json`](../examples/mcp-clients/gemini-settings.json) in `~
 ```
 
 Put the shared-memory behavior rules into `GEMINI.md`, using `agentId: "gemini-cli"`.
+
+Gemini's own model-provider authentication and workspace trust are separate from Agent Memory authentication. A correctly configured `agent-memory` server can still be suppressed in an untrusted folder, and a headless Gemini invocation still needs Gemini/Google provider authentication before the agent can decide to call MCP tools. Keep those host security controls enabled and trust real workspaces normally rather than disabling them globally.
+
+## Grok Build
+
+Grok Build supports Streamable HTTP MCP servers in `~/.grok/config.toml` for user scope and `.grok/config.toml` for project scope. HTTP servers support custom headers.
+
+Use [`grok-config.toml`](../examples/mcp-clients/grok-config.toml) as the native configuration shape, or add the server from the CLI:
+
+```bash
+export MEMORY_SERVER_TOKEN="..."
+grok mcp add --scope user --transport http agent-memory http://127.0.0.1:7337/mcp \
+  --header "Authorization: Bearer ${MEMORY_SERVER_TOKEN}"
+grok mcp doctor agent-memory
+```
+
+The CLI command above expands the shell variable before writing the user configuration, so `~/.grok/config.toml` becomes secret-bearing. Keep that file private and never commit a real token. For a project-scoped `.grok/config.toml`, use a safe team credential strategy instead of checking an Authorization token into source control.
+
+Put the shared-memory behavior rules into `AGENTS.md`, using `agentId: "grok"`.
+
+Grok also has its own optional local cross-session memory feature. That storage is separate from Agent Memory. If your goal is one memory plane shared with Claude, Codex, and other clients, treat Agent Memory Server as the authoritative durable memory rather than assuming Grok's local memory will synchronize across tools.
+
+## ChatOnSteroids
+
+ChatOnSteroids can expose an external MCP server through its Plugins connector and can persist short standing instructions for the executor. Add Agent Memory as a remote Streamable HTTP MCP plugin and use `agentId: "chat-on-steroids"` in the shared-memory behavior rules.
+
+For the MCP URL, use either HTTPS or loopback HTTP. ChatOnSteroids intentionally rejects arbitrary plain-HTTP remote MCP URLs. If your Memory Server is on a LAN/VPN address without TLS, keep that protection in place and put a loopback reverse proxy or another trusted TLS boundary in front of the server instead of weakening the client's URL policy. The local bridge can also supply the upstream Bearer token so the ChatOnSteroids plugin record does not need to contain a plaintext credential.
+
+One working pattern is a loopback-only Caddy bridge. Replace the upstream host with your own private Memory Server address and provide `MEMORY_SERVER_TOKEN` to the Caddy process through its environment:
+
+```caddyfile
+http://127.0.0.1:17337 {
+    bind 127.0.0.1
+
+    reverse_proxy http://memory-server.internal:7337 {
+        header_up Authorization "Bearer {env.MEMORY_SERVER_TOKEN}"
+    }
+}
+```
+
+Then add the ChatOnSteroids remote plugin with `http://127.0.0.1:17337/mcp`. Keep the explicit `bind 127.0.0.1`; the site label alone should not be treated as proof that the listener is loopback-only. Verify the actual listener before relying on the bridge as a local security boundary.
+
+After adding or changing the remote plugin, restart ChatOnSteroids if the current process has already loaded its plugin/config state. Then confirm the Agent Memory plugin discovers `memory_health`, `memory_recall`, and `memory_capture`. If the ChatGPT-side **Chat On Steroids Plugins** connector still shows an older schema, refresh or re-enroll that connector before testing from a new chat.
+
+Persistent instructions should follow [`agent-memory-instructions.md`](../examples/mcp-clients/agent-memory-instructions.md), with the stable `chat-on-steroids` identity. A complete acceptance check is: `memory_health` succeeds, an existing shared memory can be recalled, a harmless durable fact can be captured, and a later recall returns the newly stored fact.
 
 ## VS Code agents
 
@@ -178,7 +231,7 @@ Prefer native MCP for ordinary agent tool use and the host's native lifecycle in
 
 ## Cross-agent verification
 
-After two clients are connected, verify actual shared memory rather than only tool discovery.
+After two clients are connected, verify actual shared memory rather than only tool discovery. Real-environment acceptance has verified both Claude Code → Codex recall and Codex capture → Claude Code + Grok recall through the same central server.
 
 1. In client A, establish a harmless durable fact, for example: `Remember that the cross-agent verification phrase is sapphire-742.`
 2. Confirm that client A calls `memory_capture` with its own stable `agentId`.

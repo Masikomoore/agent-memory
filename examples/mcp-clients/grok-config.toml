@@ -1,0 +1,9 @@
+# Copy this block into ~/.grok/config.toml for a user-scoped setup.
+# Replace REPLACE_WITH_MEMORY_SERVER_TOKEN locally. Do not commit a real token.
+
+[mcp_servers.agent-memory]
+url = "http://127.0.0.1:7337/mcp"
+enabled = true
+
+[mcp_servers.agent-memory.headers]
+Authorization = "Bearer REPLACE_WITH_MEMORY_SERVER_TOKEN"

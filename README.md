@@ -4,7 +4,7 @@
 
 ### One memory. Every agent.
 
-**A self-hosted long-term memory layer shared by Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code agents, OpenClaw, and any MCP-capable client.**
+**A self-hosted long-term memory layer shared by Claude Code, Codex CLI, Cursor, Gemini CLI, Grok Build, ChatOnSteroids, VS Code agents, OpenClaw, and any MCP-capable client.**
 
 [![CI](https://github.com/Masikomoore/agent-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/Masikomoore/agent-memory/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -21,6 +21,14 @@
 > [!TIP]
 > **If you use more than one AI coding agent, Agent Memory is for you.** Star the repository if you want an open, self-hosted memory layer that stays with *you* instead of one vendor, IDE, or model.
 
+## Why I built this
+
+Agent Memory started with a painful lesson: my Codex Pro account was suspended, and I discovered that I had never kept a complete copy of my history. The local Codex project files were still on my machine, but some browser conversations, planning discussions, and the back-and-forth that shaped development decisions were simply gone.
+
+It was the first time I had personally experienced what losing access to an AI account could mean. I use products from nearly every major AI company—Claude, Codex, Grok, Gemini, and others—and that immediately made the problem feel much bigger than one account. If each agent keeps the only copy of part of my working memory, then changing tools, losing an account, or having a service disappear can also erase part of the history behind my projects.
+
+So I built **Agent Memory** as an independent memory layer that does not belong to any of those agent IDEs or CLIs. Today I use it across Claude Code, Codex CLI, Grok Build, and Gemini CLI, with one shared memory service behind them. The experience has been smooth enough that I am publishing it for other people who regularly use **two or more agents** and want their long-term working memory to stay under their own control.
+
 ## Your agents should not have separate memories
 
 Most AI tools remember in isolation. Claude Code learns something, Codex starts from zero. Cursor discovers a project convention, Gemini CLI never sees it. Switching tools means repeating yourself.
@@ -32,8 +40,10 @@ Claude Code ─┐
 Codex CLI ───┤
 Cursor ──────┤
 Gemini CLI ──┼──► Agent Memory Server ─► Memory Core ─► LanceDB
-VS Code ─────┤          MCP + REST        │
-OpenClaw ────┘                            ├─ extraction
+Grok Build ──┤          MCP + REST        │
+ChatOnSteroids┤                           ├─ extraction
+VS Code ─────┤                            │
+OpenClaw ────┘                            │
                                          ├─ hybrid retrieval
                                          ├─ decay / reinforcement
                                          └─ scopes / lifecycle
@@ -47,7 +57,7 @@ Your agents call the memory service. **The memory service—not a specific IDE o
 |---|---|
 | Every agent starts with a different history | Agents recall from one authoritative memory plane |
 | Important decisions live in chat transcripts | Durable facts are extracted into retrievable memory |
-| Switching tools means repeating context | Claude Code, Codex, Cursor, Gemini CLI, VS Code, and OpenClaw can share it |
+| Switching tools means repeating context | Claude Code, Codex, Cursor, Gemini CLI, Grok Build, ChatOnSteroids, VS Code, and OpenClaw can share it |
 | Memory is tied to a vendor or local plugin | Memory runs as your own MCP/REST service |
 | "Remember everything" becomes noisy over time | Decay, reinforcement, deduplication, tiers, and scopes manage lifecycle |
 
@@ -70,7 +80,7 @@ Your agents call the memory service. **The memory service—not a specific IDE o
 
 This is not only an MCP configuration demo. A real acceptance test has already verified the core promise:
 
-> **Claude Code captured a durable fact → a separate Codex CLI session recalled the same fact from shared global memory.**
+> **Real acceptance has verified Claude Code → Codex recall, and a separate Codex capture → Claude Code + Grok recall through the same shared memory service.**
 
 Current integration status:
 
@@ -78,9 +88,11 @@ Current integration status:
 |---|---|---|
 | Claude Code | Streamable HTTP MCP | ✅ real-environment verified |
 | Codex CLI | Streamable HTTP MCP | ✅ real-environment verified |
+| Grok Build | Streamable HTTP MCP | ✅ real-environment verified |
+| ChatOnSteroids | Streamable HTTP MCP via Plugins | ✅ real-environment verified |
 | OpenClaw | REST remote-memory mode | ✅ automated integration coverage |
 | Cursor | Streamable HTTP MCP | 🧩 config template ready |
-| Gemini CLI | Streamable HTTP MCP | 🧩 config template ready |
+| Gemini CLI | Streamable HTTP MCP | ✅ authenticated MCP transport verified |
 | VS Code agents | Streamable HTTP MCP | 🧩 config template ready |
 | Any MCP client | `/mcp` | 🧩 protocol-compatible |
 
@@ -94,6 +106,8 @@ flowchart LR
     CX[Codex CLI] --> MCP
     CU[Cursor] --> MCP
     GM[Gemini CLI] --> MCP
+    GR[Grok Build] --> MCP
+    CS[ChatOnSteroids] --> MCP
     VS[VS Code] --> MCP
     OC[OpenClaw] --> REST[REST /v1]
 
@@ -111,6 +125,10 @@ flowchart LR
 The important boundary is the server: clients never open their own competing databases. They share one authoritative memory plane.
 
 ## Quick Start
+
+### Easiest path — ask your AI agent to do it
+
+Already using Claude Code, Codex, Grok, Gemini, ChatOnSteroids, Cursor, or another coding agent? Copy [`examples/mcp-clients/agent-install-prompt.md`](examples/mcp-clients/agent-install-prompt.md) into that agent. It tells the agent to inspect your machine, preserve existing configuration, deploy or connect Agent Memory, configure the clients it finds, keep credentials out of repositories/chat history, and verify the real capture/recall path before declaring success.
 
 ### Option 1 — Docker + your providers
 
@@ -241,7 +259,7 @@ You do **not** need to understand the memory engine to contribute. The highest-v
 
 | Area | Good contribution |
 |---|---|
-| Agent integrations | Verify Cursor, Gemini CLI, VS Code, or another MCP client against a real server |
+| Agent integrations | Verify Cursor/VS Code against a real server, or complete Gemini's model-authenticated agent-level acceptance path |
 | Operations | Improve backup/restore, diagnostics, metrics, Docker, NAS, or Coolify workflows |
 | Memory quality | Reproduce a bad recall/capture case with a small fixture and expected behavior |
 | Security | Improve client identity, ACLs, token rotation, and safe remote deployment |

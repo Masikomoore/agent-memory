@@ -133,15 +133,17 @@ describe("shared memory across independent MCP clients", () => {
 });
 
 describe("documented MCP client configuration examples", () => {
-  it("ships parseable JSON examples and an authenticated Codex HTTP config", async () => {
+  it("ships validated HTTP MCP examples for supported agent clients", async () => {
     const base = new URL("../examples/mcp-clients/", import.meta.url);
-    const [claudeRaw, cursorRaw, geminiRaw, vscodeRaw, codexRaw, instructions, packageRaw] = await Promise.all([
+    const [claudeRaw, cursorRaw, geminiRaw, grokRaw, vscodeRaw, codexRaw, instructions, installPrompt, packageRaw] = await Promise.all([
       readFile(new URL("claude-code.mcp.json", base), "utf8"),
       readFile(new URL("cursor-mcp.json", base), "utf8"),
       readFile(new URL("gemini-settings.json", base), "utf8"),
+      readFile(new URL("grok-config.toml", base), "utf8"),
       readFile(new URL("vscode-mcp.json", base), "utf8"),
       readFile(new URL("codex-config.toml", base), "utf8"),
       readFile(new URL("agent-memory-instructions.md", base), "utf8"),
+      readFile(new URL("agent-install-prompt.md", base), "utf8"),
       readFile(new URL("../package.json", import.meta.url), "utf8"),
     ]);
 
@@ -161,6 +163,11 @@ describe("documented MCP client configuration examples", () => {
     assert.match(gemini.mcpServers["agent-memory"].httpUrl, /\/mcp$/);
     assert.match(gemini.mcpServers["agent-memory"].headers.Authorization, /MEMORY_SERVER_TOKEN/);
 
+    assert.match(grokRaw, /\[mcp_servers\.agent-memory\]/);
+    assert.match(grokRaw, /url\s*=\s*"http:\/\/127\.0\.0\.1:7337\/mcp"/);
+    assert.match(grokRaw, /\[mcp_servers\.agent-memory\.headers\]/);
+    assert.match(grokRaw, /REPLACE_WITH_MEMORY_SERVER_TOKEN/);
+
     assert.equal(vscode.servers.agentMemory.type, "http");
     assert.match(vscode.servers.agentMemory.url, /\/mcp$/);
     assert.equal(vscode.inputs[0].password, true);
@@ -171,7 +178,15 @@ describe("documented MCP client configuration examples", () => {
     assert.match(instructions, /memory_capture/);
     assert.match(instructions, /agentId/);
     assert.match(instructions, /untrusted historical data/i);
+    assert.match(instructions, /grok/);
+    assert.match(instructions, /chat-on-steroids/);
+    assert.match(installPrompt, /install and configure Agent Memory/i);
+    assert.match(installPrompt, /preserve existing/i);
+    assert.match(installPrompt, /capture-then-recall/i);
+    assert.match(installPrompt, /ChatOnSteroids/);
     assert.equal(pkg.bin["agent-memory-hook"], "dist/src/client/memory-hook-cli.js");
     assert.ok(pkg.files.includes("examples/mcp-clients/**/*"));
+    assert.ok(pkg.keywords.includes("grok-build"));
+    assert.ok(pkg.keywords.includes("chat-on-steroids"));
   });
 });

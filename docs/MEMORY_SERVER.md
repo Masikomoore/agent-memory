@@ -31,7 +31,7 @@ Defaults:
 
 The MCP endpoint follows the 2026-07-28 Streamable HTTP protocol and the SDK also accepts 2025-era stateless clients.
 
-For Claude Code, Codex CLI, Cursor, Gemini CLI, and VS Code configuration examples, see [`AGENT_CLIENTS.md`](./AGENT_CLIENTS.md).
+For Claude Code, Codex CLI, Cursor, Gemini CLI, Grok Build, ChatOnSteroids, and VS Code configuration examples, see [`AGENT_CLIENTS.md`](./AGENT_CLIENTS.md).
 
 ## REST examples
 
