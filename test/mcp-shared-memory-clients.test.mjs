@@ -100,6 +100,7 @@ describe("shared memory across independent MCP clients", () => {
       assert.match(writer.client.getInstructions() ?? "", /memory_recall/);
       assert.match(writer.client.getInstructions() ?? "", /memory_capture/);
       assert.match(writer.client.getInstructions() ?? "", /agentId/);
+      assert.match(writer.client.getInstructions() ?? "", /untrusted historical data/i);
 
       const capture = await writer.client.callTool({
         name: "memory_capture",
@@ -169,6 +170,8 @@ describe("documented MCP client configuration examples", () => {
     assert.match(instructions, /memory_recall/);
     assert.match(instructions, /memory_capture/);
     assert.match(instructions, /agentId/);
+    assert.match(instructions, /untrusted historical data/i);
+    assert.equal(pkg.bin["agent-memory-hook"], "dist/src/client/memory-hook-cli.js");
     assert.ok(pkg.files.includes("examples/mcp-clients/**/*"));
   });
 });

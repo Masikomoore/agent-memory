@@ -4,6 +4,15 @@ All notable public Agent Memory changes will be recorded here.
 
 ## Unreleased
 
+### Universal agent client integration
+
+- Made native Streamable HTTP MCP the primary shared-memory path for Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code agents, and other capable clients, with common server-side usage instructions.
+- Kept OpenClaw as a thin remote lifecycle adapter and moved its canonical remote auto-recall/auto-capture controls under `memory.remote.*`, while retaining compatibility with the existing top-level settings.
+- Added the `agent-memory-hook` executable as a thin REST lifecycle bridge for hosts that can run hooks/scripts but cannot automatically inject MCP memory calls.
+- Marked recalled memory as untrusted historical data in the shared MCP instructions and hook output so stored text is not treated as executable instruction authority.
+- Documented the client integration hierarchy and the VS Code Agent Host limitation around interactive `${input:...}` MCP credentials.
+- Verified the changes with TypeScript build, OpenClaw remote-mode tests, shared MCP/REST transport tests, hook CLI tests, and plugin-manifest regression coverage.
+
 ### Community launch polish
 
 - Strengthened the README around the core cross-agent value proposition, 30-second project summary, contributor entry points, and community ownership.

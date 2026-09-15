@@ -6933,6 +6933,8 @@ export function parseMemoryConnectionConfig(value: unknown): MemoryConnectionCon
     throw new Error("memory-lancedb-pro: memory.remote must be an object");
   }
   const remoteRaw = (remoteValue ?? {}) as Record<string, unknown>;
+  const remoteSetting = (key: string, legacyKey = key): unknown =>
+    remoteRaw[key] !== undefined ? remoteRaw[key] : cfg[legacyKey];
   const token = remoteRaw.token;
   if (token !== undefined && !isSecretCredential(token)) {
     throw new Error("memory-lancedb-pro: memory.remote.token must be a non-empty string or SecretRef with source env/file");
@@ -6953,16 +6955,16 @@ export function parseMemoryConnectionConfig(value: unknown): MemoryConnectionCon
       timeoutMs: parsePositiveInt(remoteRaw.timeoutMs) ?? 5_000,
       agentId: asNonEmptyString(remoteRaw.agentId),
       scope: asNonEmptyString(remoteRaw.scope),
-      autoRecall: cfg.autoRecall === true,
-      autoCapture: cfg.autoCapture !== false,
-      captureAssistant: cfg.captureAssistant === true,
-      autoRecallMinLength: parsePositiveInt(cfg.autoRecallMinLength),
-      autoRecallMinRepeated: parseNonNegativeInt(cfg.autoRecallMinRepeated) ?? 8,
-      autoRecallMaxItems: parsePositiveInt(cfg.autoRecallMaxItems) ?? 3,
-      autoRecallMaxChars: parsePositiveInt(cfg.autoRecallMaxChars) ?? 600,
-      autoRecallPerItemMaxChars: parsePositiveInt(cfg.autoRecallPerItemMaxChars) ?? 180,
-      autoRecallMaxQueryLength: clampInt(parsePositiveInt(cfg.autoRecallMaxQueryLength) ?? 2_000, 100, 10_000),
-      maxCaptureChars: parsePositiveInt(cfg.extractMaxChars) ?? 8_000,
+      autoRecall: remoteSetting("autoRecall") === true,
+      autoCapture: remoteSetting("autoCapture") !== false,
+      captureAssistant: remoteSetting("captureAssistant") === true,
+      autoRecallMinLength: parsePositiveInt(remoteSetting("autoRecallMinLength")),
+      autoRecallMinRepeated: parseNonNegativeInt(remoteSetting("autoRecallMinRepeated")) ?? 8,
+      autoRecallMaxItems: parsePositiveInt(remoteSetting("autoRecallMaxItems")) ?? 3,
+      autoRecallMaxChars: parsePositiveInt(remoteSetting("autoRecallMaxChars")) ?? 600,
+      autoRecallPerItemMaxChars: parsePositiveInt(remoteSetting("autoRecallPerItemMaxChars")) ?? 180,
+      autoRecallMaxQueryLength: clampInt(parsePositiveInt(remoteSetting("autoRecallMaxQueryLength")) ?? 2_000, 100, 10_000),
+      maxCaptureChars: parsePositiveInt(remoteSetting("maxCaptureChars", "extractMaxChars")) ?? 8_000,
     },
   };
 }

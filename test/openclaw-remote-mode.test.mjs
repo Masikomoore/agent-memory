@@ -140,14 +140,56 @@ describe("OpenClaw remote memory mode", () => {
   it("parses remote mode without embedding config and keeps embedded as the default", () => {
     assert.deepEqual(parseMemoryConnectionConfig({ embedding: { apiKey: "x" } }), { mode: "embedded" });
     const parsed = parseMemoryConnectionConfig({
-      memory: { mode: "remote", remote: { url: baseUrl, token: "central-secret", scope: "global" } },
-      autoRecall: true,
+      memory: {
+        mode: "remote",
+        remote: {
+          url: baseUrl,
+          token: "central-secret",
+          scope: "global",
+          autoRecall: true,
+          autoCapture: false,
+          captureAssistant: true,
+          autoRecallMinLength: 9,
+          autoRecallMinRepeated: 2,
+          autoRecallMaxItems: 4,
+          autoRecallMaxChars: 900,
+          autoRecallPerItemMaxChars: 220,
+          autoRecallMaxQueryLength: 1500,
+          maxCaptureChars: 12000,
+        },
+      },
+      autoRecall: false,
       autoCapture: true,
+      extractMaxChars: 1111,
     });
     assert.equal(parsed.mode, "remote");
     assert.equal(parsed.remote.url, baseUrl);
     assert.equal(parsed.remote.scope, "global");
     assert.equal(parsed.remote.autoRecall, true);
+    assert.equal(parsed.remote.autoCapture, false);
+    assert.equal(parsed.remote.captureAssistant, true);
+    assert.equal(parsed.remote.autoRecallMinLength, 9);
+    assert.equal(parsed.remote.autoRecallMinRepeated, 2);
+    assert.equal(parsed.remote.autoRecallMaxItems, 4);
+    assert.equal(parsed.remote.autoRecallMaxChars, 900);
+    assert.equal(parsed.remote.autoRecallPerItemMaxChars, 220);
+    assert.equal(parsed.remote.autoRecallMaxQueryLength, 1500);
+    assert.equal(parsed.remote.maxCaptureChars, 12000);
+
+    const legacy = parseMemoryConnectionConfig({
+      memory: { mode: "remote", remote: { url: baseUrl } },
+      autoRecall: true,
+      autoCapture: false,
+      captureAssistant: true,
+      autoRecallMaxItems: 7,
+      extractMaxChars: 4321,
+    });
+    assert.equal(legacy.mode, "remote");
+    assert.equal(legacy.remote.autoRecall, true);
+    assert.equal(legacy.remote.autoCapture, false);
+    assert.equal(legacy.remote.captureAssistant, true);
+    assert.equal(legacy.remote.autoRecallMaxItems, 7);
+    assert.equal(legacy.remote.maxCaptureChars, 4321);
     assert.throws(
       () => parseMemoryConnectionConfig({ memory: { mode: "sidecar" } }),
       /memory\.mode must be either 'embedded' or 'remote'/,
@@ -158,12 +200,17 @@ describe("OpenClaw remote memory mode", () => {
     const harness = createHarness({
       memory: {
         mode: "remote",
-        remote: { url: baseUrl, token: "central-secret", scope: "global", timeoutMs: 2_000 },
+        remote: {
+          url: baseUrl,
+          token: "central-secret",
+          scope: "global",
+          timeoutMs: 2_000,
+          autoRecall: true,
+          autoRecallMinLength: 1,
+          autoCapture: true,
+          captureAssistant: true,
+        },
       },
-      autoRecall: true,
-      autoRecallMinLength: 1,
-      autoCapture: true,
-      captureAssistant: true,
     });
 
     assert.doesNotThrow(() => memoryPlugin.register(harness.api));
@@ -209,13 +256,18 @@ describe("OpenClaw remote memory mode", () => {
     const harness = createHarness({
       memory: {
         mode: "remote",
-        remote: { url: baseUrl, token: "central-secret", scope: "project:agentmemory", timeoutMs: 2_000 },
+        remote: {
+          url: baseUrl,
+          token: "central-secret",
+          scope: "project:agentmemory",
+          timeoutMs: 2_000,
+          autoRecall: true,
+          autoRecallMinLength: 1,
+          autoRecallMinRepeated: 0,
+          autoCapture: true,
+          captureAssistant: true,
+        },
       },
-      autoRecall: true,
-      autoRecallMinLength: 1,
-      autoRecallMinRepeated: 0,
-      autoCapture: true,
-      captureAssistant: true,
     });
     memoryPlugin.register(harness.api);
 

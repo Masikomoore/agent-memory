@@ -88,6 +88,60 @@
               "scope": {
                 "type": "string",
                 "description": "Optional fixed scope for remote recall/capture. Omit to let the server apply its defaults and ACLs."
+              },
+              "autoRecall": {
+                "type": "boolean",
+                "description": "Automatically recall from the central Memory Server before prompt construction. Defaults to false when unset."
+              },
+              "autoCapture": {
+                "type": "boolean",
+                "description": "Automatically submit completed conversations to the central Memory Server. Defaults to true when unset."
+              },
+              "captureAssistant": {
+                "type": "boolean",
+                "description": "Include assistant messages in remote automatic capture. Defaults to false when unset."
+              },
+              "autoRecallMinLength": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "description": "Minimum prompt length required before remote auto-recall runs."
+              },
+              "autoRecallMinRepeated": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Minimum turns before the same remote memory can be injected again. Defaults to 8."
+              },
+              "autoRecallMaxItems": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "Maximum number of remote memories injected per turn. Defaults to 3."
+              },
+              "autoRecallMaxChars": {
+                "type": "integer",
+                "minimum": 64,
+                "maximum": 8000,
+                "description": "Maximum total characters injected by remote auto-recall. Defaults to 600."
+              },
+              "autoRecallPerItemMaxChars": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 1000,
+                "description": "Maximum characters contributed by one remotely recalled memory. Defaults to 180."
+              },
+              "autoRecallMaxQueryLength": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 10000,
+                "description": "Maximum remote auto-recall query length before truncation. Defaults to 2000."
+              },
+              "maxCaptureChars": {
+                "type": "integer",
+                "minimum": 256,
+                "maximum": 100000,
+                "description": "Maximum conversation characters submitted by remote automatic capture. Defaults to 8000."
               }
             }
           }
@@ -1861,6 +1915,56 @@
     "memory.remote.scope": {
       "label": "Remote Memory Scope",
       "help": "Optional fixed scope for OpenClaw recall and capture. Leave unset to let the server apply its own defaults and access rules.",
+      "advanced": true
+    },
+    "memory.remote.autoRecall": {
+      "label": "Remote Auto-Recall",
+      "help": "Recall from the central Memory Server before prompt construction.",
+      "advanced": false
+    },
+    "memory.remote.autoCapture": {
+      "label": "Remote Auto-Capture",
+      "help": "Submit completed conversations to the central Memory Server for server-side extraction and admission.",
+      "advanced": false
+    },
+    "memory.remote.captureAssistant": {
+      "label": "Remote Capture Assistant Messages",
+      "help": "Include assistant messages in automatic remote capture.",
+      "advanced": true
+    },
+    "memory.remote.autoRecallMinLength": {
+      "label": "Remote Auto-Recall Min Length",
+      "help": "Minimum prompt length required before remote auto-recall runs.",
+      "advanced": true
+    },
+    "memory.remote.autoRecallMinRepeated": {
+      "label": "Remote Auto-Recall Repeat Gap",
+      "help": "Minimum turns before the same remote memory can be injected again.",
+      "advanced": true
+    },
+    "memory.remote.autoRecallMaxItems": {
+      "label": "Remote Auto-Recall Max Items",
+      "help": "Maximum number of remote memories injected per turn.",
+      "advanced": true
+    },
+    "memory.remote.autoRecallMaxChars": {
+      "label": "Remote Auto-Recall Max Chars",
+      "help": "Maximum total characters injected by remote auto-recall.",
+      "advanced": true
+    },
+    "memory.remote.autoRecallPerItemMaxChars": {
+      "label": "Remote Auto-Recall Per-Item Chars",
+      "help": "Maximum characters contributed by one remotely recalled memory.",
+      "advanced": true
+    },
+    "memory.remote.autoRecallMaxQueryLength": {
+      "label": "Remote Auto-Recall Query Length",
+      "help": "Maximum remote auto-recall query length before truncation.",
+      "advanced": true
+    },
+    "memory.remote.maxCaptureChars": {
+      "label": "Remote Capture Max Chars",
+      "help": "Maximum conversation characters submitted by automatic remote capture.",
       "advanced": true
     },
     "embedding.apiKey": {

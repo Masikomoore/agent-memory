@@ -106,10 +106,37 @@ for (const hint of [
   "memory.remote.timeoutMs",
   "memory.remote.agentId",
   "memory.remote.scope",
+  "memory.remote.autoRecall",
+  "memory.remote.autoCapture",
+  "memory.remote.captureAssistant",
+  "memory.remote.autoRecallMinLength",
+  "memory.remote.autoRecallMinRepeated",
+  "memory.remote.autoRecallMaxItems",
+  "memory.remote.autoRecallMaxChars",
+  "memory.remote.autoRecallPerItemMaxChars",
+  "memory.remote.autoRecallMaxQueryLength",
+  "memory.remote.maxCaptureChars",
 ]) {
   assert.ok(
     Object.prototype.hasOwnProperty.call(manifest.uiHints, hint),
     `uiHints should expose ${hint}`,
+  );
+}
+for (const key of [
+  "autoRecall",
+  "autoCapture",
+  "captureAssistant",
+  "autoRecallMinLength",
+  "autoRecallMinRepeated",
+  "autoRecallMaxItems",
+  "autoRecallMaxChars",
+  "autoRecallPerItemMaxChars",
+  "autoRecallMaxQueryLength",
+  "maxCaptureChars",
+]) {
+  assert.ok(
+    Object.prototype.hasOwnProperty.call(manifest.configSchema.properties.memory.properties.remote.properties, key),
+    `memory.remote schema should declare ${key}`,
   );
 }
 

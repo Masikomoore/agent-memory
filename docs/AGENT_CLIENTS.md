@@ -1,6 +1,8 @@
-# External Agent MCP Clients
+# Agent Client Integration
 
-The standalone Memory Server is a shared MCP endpoint. Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code agents, and other Streamable HTTP MCP clients can all connect to the same `/mcp` endpoint and therefore use the same Memory Core and LanceDB-backed data plane.
+The standalone Memory Server is the shared memory authority. Claude Code, Codex CLI, Cursor, Gemini CLI, VS Code agents, and other Streamable HTTP MCP clients should connect directly to the same `/mcp` endpoint. OpenClaw keeps a thin native adapter so its lifecycle hooks can perform automatic recall/capture. Hosts without a suitable native lifecycle integration can use the generic `agent-memory-hook` REST bridge.
+
+All extraction, admission, deduplication, merge/supersede, lifecycle decay, tiering, embedding, and LanceDB access remain on the Memory Server. Clients only transport context and recall queries.
 
 ## Prerequisites
 
@@ -39,6 +41,8 @@ Use a stable logical `agentId` per client, for example:
 | VS Code agent | `vscode` |
 
 The server remains authoritative for scope ACLs. Leaving `scope` unset uses the normal shared/default scope policy.
+
+The MCP server also publishes common behavioral `instructions` during initialization. Keep host-specific instruction files short: they should establish a stable `agentId` and reinforce when recall/capture is useful, while the server remains the shared contract.
 
 ## Claude Code
 
@@ -100,11 +104,77 @@ Put the shared-memory behavior rules into `GEMINI.md`, using `agentId: "gemini-c
 
 ## VS Code agents
 
-VS Code supports Streamable HTTP MCP servers. Workspace configuration can live in `.vscode/mcp.json`; portable Agent Host configuration can also use workspace `.mcp.json` or user `~/.copilot/mcp-config.json`.
+VS Code supports Streamable HTTP MCP servers. Workspace configuration can live in `.vscode/mcp.json`. The included template uses a password-style `${input:...}` variable, which is appropriate for normal VS Code/extension-host sessions because VS Code stores the prompted value securely.
 
-Use [`vscode-mcp.json`](../examples/mcp-clients/vscode-mcp.json). This template uses a password-style VS Code input variable instead of committing the Bearer token. In VS Code, run `MCP: List Servers` to confirm that `agentMemory` is connected.
+Use [`vscode-mcp.json`](../examples/mcp-clients/vscode-mcp.json). In VS Code, run `MCP: List Servers` to confirm that `agentMemory` is connected.
+
+For sessions running on the newer VS Code Agent Host, interactive `${input:...}` MCP entries are not forwarded. Put a non-interactive configuration in workspace `.mcp.json` or user `~/.copilot/mcp-config.json` instead and keep the token outside source control. The exact credential source should follow the Agent Host version you run; do not copy the interactive-input template into a portable Agent Host config and assume it will be forwarded.
 
 Give the agent the same persistent memory rules and use `agentId: "vscode"`.
+
+## OpenClaw native lifecycle adapter
+
+OpenClaw should use the plugin's `memory.mode: "remote"`. In this mode the plugin does not initialize a local embedder or LanceDB database. Manual memory tools and lifecycle hooks call the central Memory Server over REST.
+
+The canonical remote configuration is under `memory.remote`:
+
+```json
+{
+  "memory": {
+    "mode": "remote",
+    "remote": {
+      "url": "http://127.0.0.1:7337",
+      "token": { "source": "env", "id": "MEMORY_SERVER_TOKEN" },
+      "agentId": "openclaw",
+      "autoRecall": true,
+      "autoCapture": true,
+      "captureAssistant": false,
+      "autoRecallMaxItems": 3,
+      "autoRecallMaxChars": 600,
+      "maxCaptureChars": 8000
+    }
+  }
+}
+```
+
+Existing top-level `autoRecall`, `autoCapture`, `captureAssistant`, `autoRecallMinLength`, `autoRecallMinRepeated`, `autoRecallMaxItems`, `autoRecallMaxChars`, `autoRecallPerItemMaxChars`, `autoRecallMaxQueryLength`, and `extractMaxChars` settings remain compatibility fallbacks for remote mode. When the corresponding `memory.remote.*` value is present, it takes precedence.
+
+Remote `autoRecall` uses OpenClaw's pre-prompt lifecycle to inject bounded, untrusted historical notes. Remote `autoCapture` submits the completed conversation to `/v1/capture`; the central server then decides whether anything deserves long-term storage.
+
+## Generic lifecycle-hook bridge
+
+Use the `agent-memory-hook` executable when a host exposes lifecycle scripts/hooks but does not have a better native way to perform automatic memory calls. It is intentionally thin and reuses the same REST API as the OpenClaw remote adapter.
+
+Configure the connection once in the hook environment:
+
+```bash
+export MEMORY_SERVER_URL="http://127.0.0.1:7337"
+export MEMORY_SERVER_TOKEN="..."
+export MEMORY_AGENT_ID="my-agent"
+# Optional: export MEMORY_SCOPE="project:agentmemory"
+```
+
+For a pre-turn hook, send the user prompt on stdin. The default output is a bounded `<relevant-memories>` block suitable for context injection:
+
+```bash
+printf '%s' "$CURRENT_PROMPT" | agent-memory-hook recall --limit 3
+```
+
+For a post-turn or session-end hook, send the conversation transcript on stdin. The bridge does not extract or classify memory locally:
+
+```bash
+printf '%s' "$CONVERSATION_TRANSCRIPT" | \
+  agent-memory-hook capture --session-key "$SESSION_KEY"
+```
+
+Operational checks can call:
+
+```bash
+agent-memory-hook health
+agent-memory-hook recall --query "What did we decide about the memory architecture?" --json
+```
+
+Prefer native MCP for ordinary agent tool use and the host's native lifecycle integration where available. The bridge exists to avoid writing a separate memory SDK for every hook system. Hook systems that send structured JSON on stdin should extract the documented prompt/transcript field before piping text into this bridge, or wrap the bridge with a very small host-specific script.
 
 ## Cross-agent verification
 

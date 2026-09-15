@@ -54,6 +54,10 @@ const pkg = readJson("package.json");
 
 verifyCompiledRuntime(pkg.main, "package.json main");
 
+for (const [name, runtimePath] of Object.entries(pkg.bin ?? {})) {
+  verifyCompiledRuntime(runtimePath, `package.json bin.${name}`);
+}
+
 const memoryServerCommand = pkg.scripts?.["memory-server"];
 if (typeof memoryServerCommand !== "string") {
   fail('package.json scripts must define "memory-server"');

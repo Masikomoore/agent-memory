@@ -4,6 +4,9 @@
   "description": "Self-hosted shared long-term memory server for AI agents, exposed over MCP and REST with LanceDB-backed retrieval and automatic memory lifecycle.",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "agent-memory-hook": "dist/src/client/memory-hook-cli.js"
+  },
   "keywords": [
     "agent-memory",
     "ai-memory",
@@ -44,6 +47,7 @@
     "build": "tsc -p tsconfig.json",
     "memory-server": "node dist/src/server/main.js",
     "memory-server:dev": "jiti src/server/main.ts",
+    "memory-hook": "node dist/src/client/memory-hook-cli.js",
     "verify-package-runtime": "npm run build && node scripts/verify-package-runtime.mjs",
     "prepack": "npm run verify-package-runtime",
     "bench": "jiti benchmark/run.ts",
