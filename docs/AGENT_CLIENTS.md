@@ -241,20 +241,25 @@ agent-memory-hook doctor
 
 Use `--project` to write into the current workspace (`.claude/settings.local.json`, `.codex/hooks.json`, `.workbuddy/settings.local.json`, `.grok/hooks/agent-memory.json`, `.agents/hooks.json`, `.cursor/hooks.json`, `.hermes/config.yaml`), or `--uninstall --apply` to cleanly remove only Agent Memory entries while preserving all other host settings and hooks. Reference templates live under [`examples/hooks`](../examples/hooks).
 
-### 3. Magpie Gateway Hook Plugin (Gateway-level auto-recall & capture)
+### 3. Magpie Gateway Hook Plugin (`magpie-agent-memory`)
 
-If you route multiple clients through [Magpie](https://github.com/yetone/magpie)'s local LLM gateway, you can install the bundled Magpie asynchronous gateway hook plugin ([`integrations/magpie`](../integrations/magpie/README.md)) so every routed client (across OpenAI Chat, OpenAI Responses, Anthropic Messages, and Gemini protocols) automatically gets pre-request recall and fire-and-forget post-response capture:
+If you route multiple clients through [Magpie](https://github.com/yetone/magpie)'s local LLM gateway, install the publishable Magpie asynchronous gateway hook package ([`integrations/magpie`](../integrations/magpie/README.md)) so every routed client (across OpenAI Chat, OpenAI Responses, Anthropic Messages, and Gemini protocols) automatically gets pre-request recall and fire-and-forget post-response capture:
 
 ```bash
+# Once published on npm / Magpie Discover:
+magpie plugin add magpie-agent-memory
+
+# Or from a local checkout:
 magpie plugin add ./integrations/magpie
-magpie plugin options ./integrations/magpie '{
+
+magpie plugin options magpie-agent-memory '{
   "gatewayTimeoutMs": 8000,
   "recallTimeoutMs": 2500,
   "skipCaptureAgents": ["claude-code", "codex", "grok", "antigravity-cli", "cursor", "hermes"]
 }'
 ```
 
-The plugin automatically reads `MEMORY_SERVER_URL` / `MEMORY_SERVER_TOKEN` from `~/.config/agent-memory/hook.env` (`chmod 600`), skips non-local `ctx.origin` traffic by default, skips tool-continuation rounds, and skips recall whenever `<relevant-memories>` was already injected by a client-side `agent-memory-hook`.
+The package ships with a `magpie.icon` SVG badge, a pre-populated `magpie.options` GUI editor template, and a ready-to-submit [`registry-entry.json`](../integrations/magpie/registry-entry.json) for `magpie-community/plugins` (see [`PUBLISHING.md`](../integrations/magpie/PUBLISHING.md)). It automatically reads `MEMORY_SERVER_URL` / `MEMORY_SERVER_TOKEN` from `~/.config/agent-memory/hook.env` (`chmod 600`), skips non-local `ctx.origin` traffic by default, skips tool-continuation rounds, and skips recall whenever `<relevant-memories>` was already injected by a client-side `agent-memory-hook`.
 
 ### 4. Generic plain-text REST bridge
 

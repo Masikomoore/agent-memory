@@ -35,14 +35,38 @@ async function withMockMemoryServer(handler, fn) {
 }
 
 describe("Magpie gateway hook plugin (integrations/magpie)", () => {
-  it("satisfies Magpie GatewayOnly package manifest contract", () => {
+  it("satisfies Magpie GatewayOnly package manifest and marketplace publishing contract", () => {
     const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
     const pkgDir = path.join(repoRoot, "integrations", "magpie");
     const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
+    assert.equal(pkg.name, "magpie-agent-memory");
+    assert.notEqual(pkg.private, true, "publishable npm package must not be private");
+    assert.equal(pkg.license, "MIT");
     assert.equal(pkg.main, undefined, "GatewayOnly package must omit main");
     assert.equal(pkg.exports, undefined, "GatewayOnly package must omit exports");
     assert.equal(pkg.magpie?.hooks, "./agent-memory.hooks.mjs");
     assert.equal(existsSync(path.join(pkgDir, pkg.magpie.hooks)), true);
+
+    assert.match(pkg.magpie?.icon ?? "", /^data:image\/svg\+xml;base64,/);
+    const decodedSvg = Buffer.from(pkg.magpie.icon.replace(/^data:image\/svg\+xml;base64,/, ""), "base64").toString("utf8");
+    assert.match(decodedSvg, /^<svg\b/);
+
+    assert.equal(typeof pkg.magpie?.options?.serverUrl, "string");
+    assert.equal(typeof pkg.magpie?.options?.gatewayTimeoutMs, "number");
+    assert.equal(typeof pkg.magpie?.options?.recallTimeoutMs, "number");
+    assert.ok(Array.isArray(pkg.magpie?.options?.skipCaptureAgents));
+
+    assert.ok(Array.isArray(pkg.files) && pkg.files.length >= 4);
+    for (const rel of pkg.files) {
+      assert.equal(existsSync(path.join(pkgDir, rel)), true, `missing packaged file: ${rel}`);
+    }
+
+    const reg = JSON.parse(readFileSync(path.join(pkgDir, "registry-entry.json"), "utf8"));
+    assert.equal(reg.package, pkg.name);
+    assert.equal(reg.name, "Agent Memory");
+    assert.equal(reg.kind, "middleware");
+    assert.ok(typeof reg.summary?.en === "string" && reg.summary.en.length > 10);
+    assert.ok(typeof reg.summary?.zh === "string" && reg.summary.zh.length > 10);
   });
 
   it("recalls and injects across chat, responses, anthropic, and gemini without altering model/stream/tools, then captures onResponse", async () => {

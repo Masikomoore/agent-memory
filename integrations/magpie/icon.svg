@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="am-bg" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#am-bg)"/>
+  <path d="M22 24L32 18L42 24M22 24V38L32 46L42 38V24M22 24L32 30L42 24M32 30V46" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.92"/>
+  <circle cx="32" cy="18" r="3.4" fill="#FFFFFF"/>
+  <circle cx="22" cy="24" r="3.2" fill="#FFFFFF"/>
+  <circle cx="42" cy="24" r="3.2" fill="#FFFFFF"/>
+  <circle cx="22" cy="38" r="3.2" fill="#E0E7FF"/>
+  <circle cx="42" cy="38" r="3.2" fill="#E0E7FF"/>
+  <circle cx="32" cy="46" r="3.4" fill="#FFFFFF"/>
+  <circle cx="32" cy="30" r="3.8" fill="#FDE68A"/>
+</svg>

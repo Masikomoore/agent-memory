@@ -1,11 +1,50 @@
 {
-  "name": "agent-memory-magpie-hooks",
+  "name": "magpie-agent-memory",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Magpie asynchronous gateway hook plugin for Agent Memory Server (auto-recall onRequest + fire-and-forget capture onResponse across Chat, Responses, Anthropic, and Gemini protocols).",
+  "description": "Shared long-term memory for every agent routed through Magpie — automatic pre-request recall and background capture powered by Agent Memory Server.",
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "magpie-hooks",
+    "agent-memory",
+    "ai-memory",
+    "long-term-memory",
+    "llm-gateway"
+  ],
+  "author": "Masikomoore",
   "license": "MIT",
+  "homepage": "https://github.com/Masikomoore/agent-memory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Masikomoore/magpie-agent-memory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Masikomoore/agent-memory/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "agent-memory.hooks.mjs",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
   "magpie": {
-    "hooks": "./agent-memory.hooks.mjs"
+    "hooks": "./agent-memory.hooks.mjs",
+    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImFtLWJnIiB4MT0iNiIgeTE9IjYiIHgyPSI1OCIgeTI9IjU4IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiM2MzY2RjEiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjOEI1Q0Y2Ii8+CiAgICA8L2xpbmVhckdyYWRpZW50PgogIDwvZGVmcz4KICA8cmVjdCB4PSI0IiB5PSI0IiB3aWR0aD0iNTYiIGhlaWdodD0iNTYiIHJ4PSIxNCIgZmlsbD0idXJsKCNhbS1iZykiLz4KICA8cGF0aCBkPSJNMjIgMjRMMzIgMThMNDIgMjRNMjIgMjRWMzhMMzIgNDZMNDIgMzhWMjRNMjIgMjRMMzIgMzBMNDIgMjRNMzIgMzBWNDYiIHN0cm9rZT0iI0ZGRkZGRiIgc3Ryb2tlLXdpZHRoPSIyLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIgc3Ryb2tlLW9wYWNpdHk9IjAuOTIiLz4KICA8Y2lyY2xlIGN4PSIzMiIgY3k9IjE4IiByPSIzLjQiIGZpbGw9IiNGRkZGRkYiLz4KICA8Y2lyY2xlIGN4PSIyMiIgY3k9IjI0IiByPSIzLjIiIGZpbGw9IiNGRkZGRkYiLz4KICA8Y2lyY2xlIGN4PSI0MiIgY3k9IjI0IiByPSIzLjIiIGZpbGw9IiNGRkZGRkYiLz4KICA8Y2lyY2xlIGN4PSIyMiIgY3k9IjM4IiByPSIzLjIiIGZpbGw9IiNFMEU3RkYiLz4KICA8Y2lyY2xlIGN4PSI0MiIgY3k9IjM4IiByPSIzLjIiIGZpbGw9IiNFMEU3RkYiLz4KICA8Y2lyY2xlIGN4PSIzMiIgY3k9IjQ2IiByPSIzLjQiIGZpbGw9IiNGRkZGRkYiLz4KICA8Y2lyY2xlIGN4PSIzMiIgY3k9IjMwIiByPSIzLjgiIGZpbGw9IiNGREU2OEEiLz4KPC9zdmc+",
+    "options": {
+      "serverUrl": "http://127.0.0.1:7337",
+      "gatewayTimeoutMs": 8000,
+      "recallTimeoutMs": 2500,
+      "recallEnabled": true,
+      "captureEnabled": true,
+      "maxItems": 3,
+      "maxChars": 600,
+      "minRepeatedTurns": 8,
+      "skipAgents": [],
+      "skipCaptureAgents": []
+    }
   }
 }
