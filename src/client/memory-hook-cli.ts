@@ -283,10 +283,17 @@ export async function executeCaptureWorkerTask(
       if (task.deleteStateAfter) {
         deleteSessionState(task.stateDir, task.agentId, task.sessionKey);
         pruneExpiredSessionStates(task.stateDir, undefined, now());
-      } else if (delta.nextCursor && delta.nextCursor !== state.transcriptCursor) {
-        state.transcriptCursor = delta.nextCursor;
-        if (delta.consumedLastPrompt) delete state.lastPrompt;
-        saveSessionState(task.stateDir, state, now());
+      } else {
+        let dirty = false;
+        if (delta.nextCursor && delta.nextCursor !== state.transcriptCursor) {
+          state.transcriptCursor = delta.nextCursor;
+          dirty = true;
+        }
+        if ((delta.consumedLastPrompt || task.eventName === "Stop") && state.lastPrompt) {
+          delete state.lastPrompt;
+          dirty = true;
+        }
+        if (dirty) saveSessionState(task.stateDir, state, now());
       }
       return { captured: false, source: delta.source, skippedReason: "no_new_turns" };
     }
@@ -527,13 +534,15 @@ async function handleLifecycleHookInner(
     const state = loadSessionState(stateDir, agentId, sessionKey, now());
 
     // Antigravity CLI's PreInvocation fires before every model call inside a
-    // multi-step tool loop (`invocationNum: 1, 2, ...`). Skip repeat recalls
-    // for follow-up invocations of the same user turn.
+    // multi-step tool loop (`invocationNum` may be 0-based or 1-based and
+    // protojson-encoded as a string or number). Because `Stop` clears
+    // `state.lastPrompt` at turn end, a matching `lastPrompt` still present
+    // with `invocationNum !== 0` indicates a follow-up invocation in the same
+    // turn — skip repeat recall to avoid injecting extra memories mid-turn.
     if (
       host === "antigravity-cli" &&
-      payload.invocationNum !== undefined &&
-      payload.invocationNum > 1 &&
-      state.lastPrompt?.text === cleanPrompt
+      state.lastPrompt?.text === cleanPrompt &&
+      payload.invocationNum !== 0
     ) {
       respond(host, "UserPromptSubmit");
       return 0;

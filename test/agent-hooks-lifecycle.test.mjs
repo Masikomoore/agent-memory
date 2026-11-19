@@ -791,27 +791,30 @@ describe("agent-memory-hook support for Grok, Antigravity CLI, Cursor, and Herme
       assert.equal(Array.isArray(pre1Json.injectSteps), true);
       assert.match(pre1Json.injectSteps[0].systemMessage.systemMessage, /verify-package-runtime/);
 
-      // 2. PreInvocation (invocationNum=2) inside same tool loop skips repeat recall and emits {}.
-      const pre2Out = outputCollector();
-      const pre2Code = await runMemoryHookCli(
-        ["handle", "--host", "antigravity-cli", "--state-dir", stateDir],
-        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
-        {
-          stdin: Readable.from([JSON.stringify({
-            hookEventName: "PreInvocation",
-            conversationId: "conv-agy-1",
-            workspacePaths: ["/tmp/proj"],
-            transcriptPath,
-            lastUserInput: "How should we verify builds before pushing?",
-            invocationNum: 2,
-          })]),
-          stdout: pre2Out.stream,
-        },
-        { createClient, homeDir },
-      );
-      assert.equal(pre2Code, 0);
-      assert.equal(recallCount, 1, "invocationNum > 1 with same prompt must skip redundant recall");
-      assert.deepEqual(JSON.parse(pre2Out.text()), {});
+      // 2. PreInvocation follow-up inside same tool loop (0-based `1`, 1-based `2`, or protojson string `"1"`)
+      //    skips repeat recall and emits {}.
+      for (const invNum of [1, "1", 2]) {
+        const pre2Out = outputCollector();
+        const pre2Code = await runMemoryHookCli(
+          ["handle", "--host", "antigravity-cli", "--state-dir", stateDir],
+          { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+          {
+            stdin: Readable.from([JSON.stringify({
+              hookEventName: "PreInvocation",
+              conversationId: "conv-agy-1",
+              workspacePaths: ["/tmp/proj"],
+              transcriptPath,
+              lastUserInput: "How should we verify builds before pushing?",
+              invocationNum: invNum,
+            })]),
+            stdout: pre2Out.stream,
+          },
+          { createClient, homeDir },
+        );
+        assert.equal(pre2Code, 0);
+        assert.equal(recallCount, 1, `follow-up invocationNum=${JSON.stringify(invNum)} with same prompt must skip redundant recall`);
+        assert.deepEqual(JSON.parse(pre2Out.text()), {});
+      }
 
       // 3. Stop captures Antigravity USER_INPUT/PLANNER_RESPONSE turns (skipping SYSTEM) and emits {"decision":""}.
       const stopOut = outputCollector();
