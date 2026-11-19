@@ -8,15 +8,17 @@ Once enabled in Magpie, every local AI coding client passing through the gateway
 
 ## How It Works
 
-`magpie-agent-memory` is a zero-dependency **Magpie asynchronous gateway hook** (`magpie.hooks`):
+`magpie-agent-memory` is a zero-dependency Magpie plugin combining **asynchronous gateway hooks** (`magpie.hooks`) with **built-in Plugin MCP Tools** (`/mcp/magpie/tools`):
 
-1. **Before routing (`onRequest`)**:
+1. **Before routing (`onRequest` gateway hook)**:
    - Extracts the latest human prompt and calls `POST /v1/recall` on your Agent Memory Server within a bounded fail-open timeout (`recallTimeoutMs`, default `2500` ms).
    - Appends a bounded `<relevant-memories>` block (tagged as `[UNTRUSTED DATA]`) to the **latest user turn** across all 4 Magpie gateway protocols (**OpenAI Chat**, **OpenAI Responses**, **Anthropic Messages**, and **Google Gemini**) — keeping system/prefix prompt caching intact and never mutating `model`, `stream`, `tools`, or `tool_choice`.
    - Suppresses recently recalled memory IDs for `minRepeatedTurns` turns (default `8`), skips trivial greetings/slash commands, and skips mid-loop tool-result continuations.
-2. **After streaming completes (`onResponse`)**:
+2. **After streaming completes (`onResponse` gateway hook)**:
    - Runs fire-and-forget after client EOF (never adds latency to replies).
    - Extracts the clean user + assistant exchange (stripping `thinking`, `reasoning`, `tool_use`, `functionCall`, and `<relevant-memories>` blocks), deduplicates by SHA-256 content hash, and posts it to `POST /v1/capture`.
+3. **On-demand MCP tools (`/mcp/magpie/tools`)**:
+   - Exposes `magpie-agent-memory_recall`, `magpie-agent-memory_capture`, and `magpie-agent-memory_health` through Magpie's built-in Plugin Tools MCP server (`http://127.0.0.1:3425/mcp/magpie/tools`), letting any MCP-capable client explicitly search, store, or health-check shared memory without extra per-client setup.
 
 ---
 

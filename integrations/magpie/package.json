@@ -1,12 +1,14 @@
 {
   "name": "magpie-agent-memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Shared long-term memory for every agent routed through Magpie — automatic pre-request recall and background capture powered by Agent Memory Server.",
+  "main": "./index.mjs",
+  "description": "Shared long-term memory for every agent routed through Magpie — automatic pre-request recall, background capture, and built-in MCP memory tools powered by Agent Memory Server.",
   "keywords": [
     "magpie",
     "magpie-plugin",
     "magpie-hooks",
+    "magpie-tools",
     "agent-memory",
     "ai-memory",
     "long-term-memory",
@@ -26,6 +28,7 @@
     "node": ">=20.0.0"
   },
   "files": [
+    "index.mjs",
     "agent-memory.hooks.mjs",
     "icon.svg",
     "README.md",

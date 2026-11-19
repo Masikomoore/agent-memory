@@ -1,9 +1,9 @@
 {
   "package": "magpie-agent-memory",
-  "name": "Agent Memory",
+  "name": "agent-memory",
   "kind": "middleware",
   "summary": {
-    "en": "Shared long-term memory across every agent through your self-hosted Agent Memory Server: automatic pre-request recall and background capture.",
-    "zh": "接入自托管 Agent Memory Server，为经过 Magpie 网关的所有 Agent 提供跨端长期共享记忆：请求前自动召回、回复后后台异步沉淀。"
+    "en": "Shared long-term memory across every agent through your self-hosted Agent Memory Server: automatic gateway recall/capture plus built-in MCP memory tools.",
+    "zh": "接入自托管 Agent Memory Server，为经过 Magpie 网关的所有 Agent 提供跨端长期共享记忆：请求前自动召回、回复后后台捕获，并提供内置 MCP 记忆工具。"
   }
 }

@@ -10,6 +10,7 @@ import {
   onResponse,
   resetSessionStateForTests,
 } from "../integrations/magpie/agent-memory.hooks.mjs";
+import * as toolsEntry from "../integrations/magpie/index.mjs";
 
 function makeTempDir(prefix) {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -35,15 +36,15 @@ async function withMockMemoryServer(handler, fn) {
 }
 
 describe("Magpie gateway hook plugin (integrations/magpie)", () => {
-  it("satisfies Magpie GatewayOnly package manifest and marketplace publishing contract", () => {
+  it("satisfies Magpie dual-capability (hooks + tools) manifest and marketplace publishing contract", () => {
     const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
     const pkgDir = path.join(repoRoot, "integrations", "magpie");
     const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
     assert.equal(pkg.name, "magpie-agent-memory");
     assert.notEqual(pkg.private, true, "publishable npm package must not be private");
     assert.equal(pkg.license, "MIT");
-    assert.equal(pkg.main, undefined, "GatewayOnly package must omit main");
-    assert.equal(pkg.exports, undefined, "GatewayOnly package must omit exports");
+    assert.equal(pkg.main, "./index.mjs");
+    assert.equal(existsSync(path.join(pkgDir, pkg.main)), true);
     assert.equal(pkg.magpie?.hooks, "./agent-memory.hooks.mjs");
     assert.equal(existsSync(path.join(pkgDir, pkg.magpie.hooks)), true);
 
@@ -56,17 +57,64 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
     assert.equal(typeof pkg.magpie?.options?.recallTimeoutMs, "number");
     assert.ok(Array.isArray(pkg.magpie?.options?.skipCaptureAgents));
 
-    assert.ok(Array.isArray(pkg.files) && pkg.files.length >= 4);
+    assert.ok(Array.isArray(pkg.files) && pkg.files.length >= 5);
     for (const rel of pkg.files) {
       assert.equal(existsSync(path.join(pkgDir, rel)), true, `missing packaged file: ${rel}`);
     }
 
     const reg = JSON.parse(readFileSync(path.join(pkgDir, "registry-entry.json"), "utf8"));
     assert.equal(reg.package, pkg.name);
-    assert.equal(reg.name, "Agent Memory");
+    assert.equal(reg.name, "agent-memory");
     assert.equal(reg.kind, "middleware");
     assert.ok(typeof reg.summary?.en === "string" && reg.summary.en.length > 10);
     assert.ok(typeof reg.summary?.zh === "string" && reg.summary.zh.length > 10);
+  });
+
+  it("exports a single OpenCode plugin function providing recall, capture, and health MCP tools", async () => {
+    const exportedFunctions = Object.entries(toolsEntry).filter(([, v]) => typeof v === "function");
+    assert.equal(exportedFunctions.length, 1, "index.mjs must export only the single plugin entry function");
+
+    await withMockMemoryServer(
+      async (req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        if (req.url === "/health") {
+          res.end(JSON.stringify({ status: "ok", memories: 7, captureEnabled: true }));
+          return;
+        }
+        if (req.url === "/v1/recall") {
+          res.end(JSON.stringify({ count: 1, memories: [{ id: "t1", text: "Stored fact", score: 0.9 }] }));
+          return;
+        }
+        res.end(JSON.stringify({ created: 1, merged: 0 }));
+      },
+      async ({ baseUrl, received }) => {
+        const hooks = await toolsEntry.AgentMemoryToolsPlugin({}, { serverUrl: baseUrl, token: "tool-secret" });
+        assert.deepEqual(Object.keys(hooks.tool).sort(), ["capture", "health", "recall"]);
+
+        const abort = new AbortController().signal;
+        const h = await hooks.tool.health.execute({}, { agent: "claude", abort });
+        assert.equal(h.serverUrl, baseUrl);
+        assert.equal(h.tokenConfigured, true);
+        assert.equal(h.health.memories, 7);
+        assert.ok(!JSON.stringify(h).includes("tool-secret"), "health output must never expose token");
+
+        const r = await hooks.tool.recall.execute({ query: "stored fact", limit: 3 }, { agent: "agy", abort });
+        assert.equal(r.count, 1);
+
+        const c = await hooks.tool.capture.execute({ text: "We use Bun for Magpie plugins." }, { agent: "claude", abort });
+        assert.equal(c.created, 1);
+
+        const recallReq = received.find((x) => x.url === "/v1/recall");
+        assert.equal(recallReq.auth, "Bearer tool-secret");
+        assert.equal(recallReq.body.agentId, "antigravity-cli");
+        assert.equal(recallReq.body.source, "manual");
+
+        const captureReq = received.find((x) => x.url === "/v1/capture");
+        assert.equal(captureReq.auth, "Bearer tool-secret");
+        assert.equal(captureReq.body.agentId, "claude-code");
+        assert.match(captureReq.body.conversationText, /Bun for Magpie plugins/);
+      },
+    );
   });
 
   it("recalls and injects across chat, responses, anthropic, and gemini without altering model/stream/tools, then captures onResponse", async () => {
