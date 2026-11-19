@@ -22,6 +22,10 @@ import {
  * admission-control.ts's per-lane model resolution, so both paths agree on
  * exactly one definition of "what a direct client can accept."
  */
+export function isHostRuntimeLifecycleError(message: string | null | undefined): boolean {
+  return typeof message === "string" && /async work scope is closed/i.test(message);
+}
+
 export function normalizeDirectModelRef(modelRef: string): string {
   const trimmed = modelRef.trim();
   const idx = trimmed.indexOf("/");
@@ -127,6 +131,13 @@ export interface LlmClient {
    * and ignores this argument.
    */
   completeJson<T>(prompt: string, label?: string, systemPrompt?: string, temperature?: number): Promise<T | null>;
+  /**
+   * Send a prompt and return the model's answer as trimmed text. No JSON
+   * expectation is attached and `systemPrompt` is sent verbatim (no system
+   * message at all when omitted). Returns null on a transport failure or an
+   * empty answer; `getLastError` carries the reason.
+   */
+  completeText(prompt: string, label?: string, systemPrompt?: string, temperature?: number): Promise<string | null>;
   /** Best-effort diagnostics for the most recent failure, if any. */
   getLastError(): string | null;
 }
@@ -206,10 +217,41 @@ function sanitizeLabelHeader(label: string): string {
   return cleaned || "generic";
 }
 
-function previewText(value: string, maxLen = 200): string {
-  const normalized = value.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLen) return normalized;
-  return `${normalized.slice(0, maxLen - 3)}...`;
+/**
+ * Content-free summary of a JSON.parse failure. Engine messages quote the
+ * input they failed on (e.g. V8's `Unexpected token 'N', "No JSON: ..." is
+ * not valid JSON`), so only the error class and the numeric position survive.
+ */
+function describeJsonParseError(err: unknown): string {
+  const name = err instanceof Error && /^[A-Za-z]{1,64}$/.test(err.name) ? err.name : "Error";
+  const message = err instanceof Error ? err.message : String(err);
+  const position = /\bposition (\d+)/i.exec(message)?.[1];
+  return position !== undefined ? `${name} at position ${position}` : name;
+}
+
+type JsonFailure =
+  | { category: "non-json"; chars: number }
+  | { category: "parse-failure"; chars: number; jsonChars: number; error: unknown }
+  | { category: "repair-failure"; chars: number; jsonChars: number; error: unknown; repairError: unknown };
+
+/**
+ * Builds the completeJson() failure diagnostic (log line and getLastError()).
+ * The response may carry the conversation or memory being extracted, and the
+ * default log sink is the host debug logger, so this deliberately records
+ * only the stage label, the failure category, sizes and parse-error class /
+ * position -- never response text or raw JSON.parse messages.
+ */
+function formatJsonFailure(label: string, transportTag: string | null, failure: JsonFailure): string {
+  const prefix = `memory-lancedb-pro: llm-client [${label}]`;
+  const tag = transportTag ? `${transportTag} ` : "";
+  switch (failure.category) {
+    case "non-json":
+      return `${prefix} no JSON object found${transportTag ? ` in ${transportTag} response` : ""} (category=non-json, chars=${failure.chars})`;
+    case "parse-failure":
+      return `${prefix} ${tag}JSON.parse failed (category=parse-failure, error=${describeJsonParseError(failure.error)}, chars=${failure.chars}, jsonChars=${failure.jsonChars})`;
+    case "repair-failure":
+      return `${prefix} ${tag}JSON.parse failed; heuristic repair failed (category=repair-failure, error=${describeJsonParseError(failure.error)}, repairError=${describeJsonParseError(failure.repairError)}, chars=${failure.chars}, jsonChars=${failure.jsonChars})`;
+  }
 }
 
 function nextNonWhitespaceChar(text: string, start: number): string | undefined {
@@ -389,8 +431,7 @@ function createHostClient(
 
         const jsonStr = extractJsonFromResponse(raw);
         if (!jsonStr) {
-          lastError =
-            `memory-lancedb-pro: llm-client [${label}] no JSON object found in host-transport response (chars=${raw.length}, preview=${JSON.stringify(previewText(raw))})`;
+          lastError = formatJsonFailure(label, "host-transport", { category: "non-json", chars: raw.length });
           log(lastError);
           return null;
         }
@@ -407,20 +448,64 @@ function createHostClient(
               );
               return repaired;
             } catch (repairErr) {
-              lastError =
-                `memory-lancedb-pro: llm-client [${label}] host-transport JSON.parse failed: ${err instanceof Error ? err.message : String(err)}; repair failed: ${repairErr instanceof Error ? repairErr.message : String(repairErr)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+              lastError = formatJsonFailure(label, "host-transport", {
+                category: "repair-failure",
+                chars: raw.length,
+                jsonChars: jsonStr.length,
+                error: err,
+                repairError: repairErr,
+              });
               log(lastError);
               return null;
             }
           }
-          lastError =
-            `memory-lancedb-pro: llm-client [${label}] host-transport JSON.parse failed: ${err instanceof Error ? err.message : String(err)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+          lastError = formatJsonFailure(label, "host-transport", {
+            category: "parse-failure",
+            chars: raw.length,
+            jsonChars: jsonStr.length,
+            error: err,
+          });
           log(lastError);
           return null;
         }
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const lifecycle = isHostRuntimeLifecycleError(message) ? " [host runtime lifecycle]" : "";
         lastError =
-          `memory-lancedb-pro: llm-client [${label}] host-transport request failed for model ${config.model}: ${err instanceof Error ? err.message : String(err)}`;
+          `memory-lancedb-pro: llm-client [${label}] host-transport request failed for model ${config.model}: ${message}${lifecycle}`;
+        (warnLog ?? log)(lastError);
+        return null;
+      }
+    },
+    async completeText(prompt: string, label = "generic", systemPrompt?: string, temperature?: number): Promise<string | null> {
+      lastError = null;
+      const messages: RuntimeLlmCompleteMessage[] = [];
+      if (systemPrompt !== undefined) messages.push({ role: "system", content: systemPrompt });
+      messages.push({ role: "user", content: prompt });
+      try {
+        const result = await raceWithTimeout(
+          runtimeLlmComplete({
+            messages,
+            ...(config.modelExplicit ? { model: config.model } : {}),
+            temperature: temperature ?? 0.1,
+            purpose: `memory-lancedb-pro:${label}`,
+            reasoning: config.thinkLevel?.trim() || DEFAULT_HOST_REASONING_EFFORT,
+          }),
+          config.timeoutMs,
+        );
+        const text = typeof result?.text === "string" ? result.text.trim() : "";
+        if (!text) {
+          lastError =
+            `memory-lancedb-pro: llm-client [${label}] empty host-transport response content from model ${config.model}`;
+          log(lastError);
+          return null;
+        }
+        return text;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const lifecycle = isHostRuntimeLifecycleError(message) ? " [host runtime lifecycle]" : "";
+        lastError =
+          `memory-lancedb-pro: llm-client [${label}] host-transport request failed for model ${config.model}: ${message}${lifecycle}`;
         (warnLog ?? log)(lastError);
         return null;
       }
@@ -498,8 +583,7 @@ function createApiKeyClient(config: LlmClientConfig, log: (msg: string) => void,
 
         const jsonStr = extractJsonFromResponse(raw);
         if (!jsonStr) {
-          lastError =
-            `memory-lancedb-pro: llm-client [${label}] no JSON object found (chars=${raw.length}, preview=${JSON.stringify(previewText(raw))})`;
+          lastError = formatJsonFailure(label, null, { category: "non-json", chars: raw.length });
           log(lastError);
           return null;
         }
@@ -516,17 +600,59 @@ function createApiKeyClient(config: LlmClientConfig, log: (msg: string) => void,
               );
               return repaired;
             } catch (repairErr) {
-              lastError =
-                `memory-lancedb-pro: llm-client [${label}] JSON.parse failed: ${err instanceof Error ? err.message : String(err)}; repair failed: ${repairErr instanceof Error ? repairErr.message : String(repairErr)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+              lastError = formatJsonFailure(label, null, {
+                category: "repair-failure",
+                chars: raw.length,
+                jsonChars: jsonStr.length,
+                error: err,
+                repairError: repairErr,
+              });
               log(lastError);
               return null;
             }
           }
-          lastError =
-            `memory-lancedb-pro: llm-client [${label}] JSON.parse failed: ${err instanceof Error ? err.message : String(err)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+          lastError = formatJsonFailure(label, null, {
+            category: "parse-failure",
+            chars: raw.length,
+            jsonChars: jsonStr.length,
+            error: err,
+          });
           log(lastError);
           return null;
         }
+      } catch (err) {
+        lastError =
+          `memory-lancedb-pro: llm-client [${label}] request failed for model ${config.model}: ${err instanceof Error ? err.message : String(err)}`;
+        (warnLog ?? log)(lastError);
+        return null;
+      }
+    },
+    async completeText(prompt: string, label = "generic", systemPrompt?: string, temperature?: number): Promise<string | null> {
+      lastError = null;
+      try {
+        const request = {
+          model: config.model,
+          messages: [
+            ...(systemPrompt !== undefined ? [{ role: "system", content: systemPrompt }] : []),
+            { role: "user", content: prompt },
+          ],
+          temperature: temperature ?? 0.1,
+          ...(config.thinkLevel?.trim()
+            ? { reasoning: { effort: config.thinkLevel.trim() } }
+            : {}),
+        };
+        const response = await client.chat.completions.create(request as any, {
+          headers: { "x-memory-call-label": sanitizeLabelHeader(label) },
+        });
+        const raw = response.choices?.[0]?.message?.content;
+        const text = typeof raw === "string" ? raw.trim() : "";
+        if (!text) {
+          lastError =
+            `memory-lancedb-pro: llm-client [${label}] empty response content from model ${config.model}`;
+          log(lastError);
+          return null;
+        }
+        return text;
       } catch (err) {
         lastError =
           `memory-lancedb-pro: llm-client [${label}] request failed for model ${config.model}: ${err instanceof Error ? err.message : String(err)}`;
@@ -610,31 +736,7 @@ function createOauthClient(config: LlmClientConfig, log: (msg: string) => void, 
             throw new Error(`HTTP ${response.status} ${response.statusText}: ${detail.slice(0, 500)}`);
           }
 
-          const bodyText = await response.text();
-          const raw = (
-            response.headers.get("content-type")?.includes("text/event-stream") ||
-            looksLikeSseResponse(bodyText)
-          )
-            ? extractOutputTextFromSse(bodyText)
-            : (() => {
-                try {
-                  const parsed = JSON.parse(bodyText) as Record<string, unknown>;
-                  const output = Array.isArray(parsed.output) ? parsed.output : [];
-                  const first = output.find(
-                    (item) =>
-                      item &&
-                      typeof item === "object" &&
-                      Array.isArray((item as Record<string, unknown>).content),
-                  ) as Record<string, unknown> | undefined;
-                  if (!first) return null;
-                  const content = (first.content as Array<Record<string, unknown>>).find(
-                    (part) => part?.type === "output_text" && typeof part.text === "string",
-                  );
-                  return typeof content?.text === "string" ? content.text : null;
-                } catch {
-                  return null;
-                }
-              })();
+          const raw = extractOauthOutputText(response, await response.text());
 
           if (!raw) {
             lastError =
@@ -645,8 +747,7 @@ function createOauthClient(config: LlmClientConfig, log: (msg: string) => void, 
 
           const jsonStr = extractJsonFromResponse(raw);
           if (!jsonStr) {
-            lastError =
-              `memory-lancedb-pro: llm-client [${label}] no JSON object found in OAuth response (chars=${raw.length}, preview=${JSON.stringify(previewText(raw))})`;
+            lastError = formatJsonFailure(label, "OAuth", { category: "non-json", chars: raw.length });
             log(lastError);
             return null;
           }
@@ -663,17 +764,75 @@ function createOauthClient(config: LlmClientConfig, log: (msg: string) => void, 
                 );
                 return repaired;
               } catch (repairErr) {
-                lastError =
-                  `memory-lancedb-pro: llm-client [${label}] OAuth JSON.parse failed: ${err instanceof Error ? err.message : String(err)}; repair failed: ${repairErr instanceof Error ? repairErr.message : String(repairErr)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+                lastError = formatJsonFailure(label, "OAuth", {
+                  category: "repair-failure",
+                  chars: raw.length,
+                  jsonChars: jsonStr.length,
+                  error: err,
+                  repairError: repairErr,
+                });
                 log(lastError);
                 return null;
               }
             }
-            lastError =
-              `memory-lancedb-pro: llm-client [${label}] OAuth JSON.parse failed: ${err instanceof Error ? err.message : String(err)} (jsonChars=${jsonStr.length}, jsonPreview=${JSON.stringify(previewText(jsonStr))})`;
+            lastError = formatJsonFailure(label, "OAuth", {
+              category: "parse-failure",
+              chars: raw.length,
+              jsonChars: jsonStr.length,
+              error: err,
+            });
             log(lastError);
             return null;
           }
+        } finally {
+          dispose();
+        }
+      } catch (err) {
+        lastError =
+          `memory-lancedb-pro: llm-client [${label}] OAuth request failed for model ${config.model}: ${err instanceof Error ? err.message : String(err)}`;
+        (warnLog ?? log)(lastError);
+        return null;
+      }
+    },
+    async completeText(prompt: string, label = "generic", systemPrompt?: string, _temperature?: number): Promise<string | null> {
+      lastError = null;
+      try {
+        const session = await getSession();
+        const { signal, dispose } = createTimeoutSignal(config.timeoutMs);
+        const endpoint = buildOauthEndpoint(config.baseURL, config.oauthProvider);
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${session.accessToken}`,
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+              "OpenAI-Beta": "responses=experimental",
+              "chatgpt-account-id": session.accountId,
+              originator: "codex_cli_rs",
+            },
+            signal,
+            body: JSON.stringify({
+              model: normalizeOauthModel(config.model),
+              ...(systemPrompt !== undefined ? { instructions: systemPrompt } : {}),
+              input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+              store: false,
+              stream: true,
+              text: { format: { type: "text" } },
+            }),
+          });
+          if (!response.ok) {
+            const detail = await response.text().catch(() => "");
+            throw new Error(`HTTP ${response.status} ${response.statusText}: ${detail.slice(0, 500)}`);
+          }
+          const text = (extractOauthOutputText(response, await response.text()) ?? "").trim();
+          if (!text) {
+            lastError =
+              `memory-lancedb-pro: llm-client [${label}] empty OAuth response content from model ${config.model}`;
+            log(lastError);
+            return null;
+          }
+          return text;
         } finally {
           dispose();
         }
@@ -688,6 +847,26 @@ function createOauthClient(config: LlmClientConfig, log: (msg: string) => void, 
       return lastError;
     },
   };
+}
+
+function extractOauthOutputText(response: Response, bodyText: string): string | null {
+  if (response.headers.get("content-type")?.includes("text/event-stream") || looksLikeSseResponse(bodyText)) {
+    return extractOutputTextFromSse(bodyText);
+  }
+  try {
+    const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+    const output = Array.isArray(parsed.output) ? parsed.output : [];
+    const first = output.find(
+      (item) => item && typeof item === "object" && Array.isArray((item as Record<string, unknown>).content),
+    ) as Record<string, unknown> | undefined;
+    if (!first) return null;
+    const content = (first.content as Array<Record<string, unknown>>).find(
+      (part) => part?.type === "output_text" && typeof part.text === "string",
+    );
+    return typeof content?.text === "string" ? content.text : null;
+  } catch {
+    return null;
+  }
 }
 
 /** OpenRouter's direct API base URL, used as the host->direct fallback's default when llm.baseURL is not configured. */
