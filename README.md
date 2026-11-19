@@ -4,7 +4,7 @@
 
 ### One memory. Every agent.
 
-**A self-hosted long-term memory layer shared by Claude Code, Codex CLI, Cursor, Gemini CLI, Grok Build, ChatOnSteroids, VS Code agents, OpenClaw, and any MCP-capable client.**
+**A self-hosted long-term memory layer shared by Claude Code, Codex CLI, WorkBuddy, Cursor, Gemini CLI, Grok Build, VS Code agents, OpenClaw, and any MCP-capable client — combining on-demand MCP tools with zero-friction Session/Turn Hooks.**
 
 [![CI](https://github.com/Masikomoore/agent-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/Masikomoore/agent-memory/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -36,17 +36,15 @@ Most AI tools remember in isolation. Claude Code learns something, Codex starts 
 Agent Memory gives them **one private, continuously maintained memory service**:
 
 ```text
-Claude Code ─┐
-Codex CLI ───┤
-Cursor ──────┤
-Gemini CLI ──┼──► Agent Memory Server ─► Memory Core ─► LanceDB
-Grok Build ──┤          MCP + REST        │
-ChatOnSteroids┤                           ├─ extraction
-VS Code ─────┤                            │
-OpenClaw ────┘                            │
-                                         ├─ hybrid retrieval
-                                         ├─ decay / reinforcement
-                                         └─ scopes / lifecycle
+Claude Code ───┐  MCP (/mcp) + Hooks (UserPromptSubmit / Stop / PreCompact / SessionEnd)
+Codex CLI ─────┤  MCP (/mcp) + Hooks (UserPromptSubmit / Stop)
+WorkBuddy ─────┤  MCP (/mcp) + Hooks (~/.workbuddy/settings.json)
+Cursor ────────┼──► Agent Memory Server ─► Memory Core ─► LanceDB
+Gemini CLI ────┤       MCP + REST           │
+Grok Build ────┤                            ├─ SmartExtractor + transient retry
+VS Code ───────┤                            ├─ Hybrid retrieval (Vector + full-layer BM25)
+OpenClaw ──────┘                            ├─ decay / reinforcement / dedup / compaction
+                                            └─ scopes / lifecycle
 ```
 
 Your agents call the memory service. **The memory service—not a specific IDE or agent—owns the long-term memory.**
@@ -57,7 +55,7 @@ Your agents call the memory service. **The memory service—not a specific IDE o
 |---|---|
 | Every agent starts with a different history | Agents recall from one authoritative memory plane |
 | Important decisions live in chat transcripts | Durable facts are extracted into retrievable memory |
-| Switching tools means repeating context | Claude Code, Codex, Cursor, Gemini CLI, Grok Build, ChatOnSteroids, VS Code, and OpenClaw can share it |
+| Switching tools means repeating context | Claude Code, Codex, WorkBuddy, Cursor, Gemini CLI, Grok Build, VS Code, and OpenClaw can share it |
 | Memory is tied to a vendor or local plugin | Memory runs as your own MCP/REST service |
 | "Remember everything" becomes noisy over time | Decay, reinforcement, deduplication, tiers, and scopes manage lifecycle |
 
@@ -68,11 +66,11 @@ Your agents call the memory service. **The memory service—not a specific IDE o
 | | Agent Memory |
 |---|---|
 | **Shared across tools** | One memory backend for independent agents and IDEs |
-| **Automatic** | Agents recall and capture durable context without hand-editing a knowledge base |
+| **Dual-track automatic** | **Session/Turn Hooks** (`agent-memory-hook`) auto-recall before every turn and async-capture in the background, coexisting with **MCP** for explicit search/capture |
 | **Self-hosted** | Run locally, on a homelab, LAN, VPN, or private server |
-| **Protocol-first** | Streamable HTTP MCP for agents + REST for integrations |
-| **Durable** | LanceDB persistence with hybrid semantic/keyword retrieval |
-| **Memory lifecycle** | Extraction, deduplication, decay, reinforcement, tiering, and scope controls |
+| **Protocol-first** | Streamable HTTP MCP for agents + REST for hooks and native adapters |
+| **Durable & full-layer BM25** | LanceDB persistence indexing `text` + L0/L1/L2 summary layers (`search_text`), duplicate-ID write safety, and redacted LLM error diagnostics |
+| **Memory lifecycle** | Smart extraction with transient retry, deduplication, decay, reinforcement, scope-isolated compaction, tiering, and scope controls |
 | **Provider-flexible** | OpenAI-compatible embedding/LLM APIs or local Ollama |
 | **No knowledge graph required** | Deliberately focused on durable agent memory, not graph administration |
 
@@ -84,19 +82,28 @@ This is not only an MCP configuration demo. A real acceptance test has already v
 
 Current integration status:
 
-| Client | Integration | Status |
-|---|---|---|
-| Claude Code | Streamable HTTP MCP | ✅ real-environment verified |
-| Codex CLI | Streamable HTTP MCP | ✅ real-environment verified |
-| Grok Build | Streamable HTTP MCP | ✅ real-environment verified |
-| ChatOnSteroids | Streamable HTTP MCP via Plugins | ✅ real-environment verified |
-| OpenClaw | REST remote-memory mode | ✅ automated integration coverage |
-| Cursor | Streamable HTTP MCP | 🧩 config template ready |
-| Gemini CLI | Streamable HTTP MCP | ✅ authenticated MCP transport verified |
-| VS Code agents | Streamable HTTP MCP | 🧩 config template ready |
-| Any MCP client | `/mcp` | 🧩 protocol-compatible |
+| Client | MCP | Session/Turn Hooks (`agent-memory-hook`) | Status |
+|---|---|---|---|
+| Claude Code | Streamable HTTP `/mcp` | `~/.claude/settings.json` (`UserPromptSubmit`, async `Stop`, `PreCompact`, `SessionEnd`) | ✅ real-environment verified (MCP + Hooks) |
+| Codex CLI | Streamable HTTP `/mcp` | `~/.codex/hooks.json` (`UserPromptSubmit`, `Stop` + detached async worker) | ✅ real-environment verified (MCP + Hooks) |
+| WorkBuddy | Streamable HTTP `/mcp` | `~/.workbuddy/settings.json` (`UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd` + `hook.env`) | ✅ hook installer, templates & E2E verified |
+| Grok Build | Streamable HTTP `/mcp` | — | ✅ real-environment verified |
+| OpenClaw | REST remote-memory mode | Native lifecycle plugin (`memory.mode: "remote"`) | ✅ automated integration coverage |
+| Gemini CLI | Streamable HTTP `/mcp` | — | ✅ authenticated MCP transport verified |
+| Cursor | Streamable HTTP `/mcp` | — | 🧩 config template ready |
+| VS Code agents | Streamable HTTP `/mcp` | — | 🧩 config template ready |
+| Any MCP / Hook client | `/mcp` | `agent-memory-hook recall/capture/health` | 🧩 protocol-compatible |
 
-See [docs/AGENT_CLIENTS.md](docs/AGENT_CLIENTS.md) for client configuration.
+See [docs/AGENT_CLIENTS.md](docs/AGENT_CLIENTS.md) for full MCP and Session/Turn Hook setup guides.
+
+## Dual-track integration: MCP + Session/Turn Hooks
+
+MCP alone gives an agent tools, but still relies on the model remembering to call them. **`agent-memory-hook`** closes that gap for **Claude Code**, **Codex CLI**, and **WorkBuddy** without replacing MCP:
+
+- **Automatic pre-turn recall (`UserPromptSubmit`)**: skips trivial greetings/slash commands locally, suppresses recently injected memories for 8 turns, enforces a strict fail-open timeout, and injects bounded `<relevant-memories>` via `hookSpecificOutput.additionalContext`.
+- **Non-blocking incremental capture (`Stop` / `PreCompact` / `SessionEnd`)**: spawns a detached background worker (parent hook returns in ~50ms), parses only newly added turns from Claude/WorkBuddy JSONL or Codex rollout JSONL (with cached-prompt + `last_assistant_message` fallback), strips `<relevant-memories>` and `tool_use`/`tool_result` blocks so MCP and Hooks never loop, and never persists secrets to temp task files.
+- **Desktop GUI friendly**: loads `~/.config/agent-memory/hook.env` (`chmod 600`) when process env vars are absent, so GUI clients work without inheriting `.zshrc` exports.
+- **Non-destructive install & diagnostics**: `agent-memory-hook install <claude-code|codex|workbuddy>` merges idempotently while keeping your existing settings and hooks untouched; `agent-memory-hook doctor` verifies server health, env loading, cache dir, and installed hooks in one command.
 
 ## Architecture
 
@@ -107,7 +114,7 @@ flowchart LR
     CU[Cursor] --> MCP
     GM[Gemini CLI] --> MCP
     GR[Grok Build] --> MCP
-    CS[ChatOnSteroids] --> MCP
+    WB[WorkBuddy] --> MCP
     VS[VS Code] --> MCP
     OC[OpenClaw] --> REST[REST /v1]
 
@@ -126,11 +133,23 @@ The important boundary is the server: clients never open their own competing dat
 
 ## Quick Start
 
-### Easiest path — ask your AI agent to do it
+### Option 1 — One-sentence Agent-Assisted Install & Update (Recommended)
 
-Already using Claude Code, Codex, Grok, Gemini, ChatOnSteroids, Cursor, or another coding agent? Copy [`examples/mcp-clients/agent-install-prompt.md`](examples/mcp-clients/agent-install-prompt.md) into that agent. It tells the agent to inspect your machine, preserve existing configuration, deploy or connect Agent Memory, configure the clients it finds, keep credentials out of repositories/chat history, and verify the real capture/recall path before declaring success.
+Already using Claude Code, Codex CLI, WorkBuddy, Grok Build, Gemini CLI, or Cursor? Paste this one-line request into your agent (or copy the full checklist from [`examples/mcp-clients/agent-install-prompt.md`](examples/mcp-clients/agent-install-prompt.md)):
 
-### Option 1 — Docker + your providers
+```text
+Install or update Agent Memory from https://github.com/Masikomoore/agent-memory: inspect my installed clients and existing configs/hooks without overwriting them, connect MCP, set up ~/.config/agent-memory/hook.env (chmod 600) and agent-memory-hook for Claude Code / Codex / WorkBuddy, and verify everything with `agent-memory-hook doctor` plus a real recall/capture check.
+```
+
+What the agent automatically checks, installs, and verifies for you:
+
+1. **Client & Hook inspection**: detects installed clients (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.workbuddy/settings.json`), preserves unrelated settings and existing hooks, and picks a stable Node path + compiled `dist/src/client/memory-hook-cli.js`.
+2. **Non-destructive MCP + Hook setup & updates**: connects `/mcp`, configures `~/.config/agent-memory/hook.env` (`chmod 600`, zero secrets printed), previews via `agent-memory-hook install <host>` (dry-run), and applies idempotently with `--apply` (safe to re-run on updates).
+3. **End-to-end verification**: runs `agent-memory-hook doctor`, validates live `UserPromptSubmit` hook recall, and verifies authenticated MCP capture-then-recall before reporting done.
+
+### Option 2 — Manual Install (Server + Client Hooks)
+
+#### Step A — Start the Memory Server (Docker Compose or Direct)
 
 Requirements: Docker Compose and an x86_64/arm64 host supported by LanceDB.
 
@@ -140,57 +159,59 @@ cd agent-memory
 cp .env.example .env
 
 # Put a long random value in MEMORY_SERVER_TOKEN.
-# Example generator:
 openssl rand -hex 32
 
 docker compose up -d
 curl http://127.0.0.1:7337/health
 ```
 
-The default compose stack uses:
-
-- your configured OpenAI-compatible embedding provider
-- your configured OpenAI-compatible SmartExtractor LLM provider
-- a persistent volume for LanceDB
-- loopback-only host publishing by default
-
-If you prefer an all-local Ollama stack, use the optional overlay:
+The default compose stack uses your configured OpenAI-compatible embedding & SmartExtractor LLM providers, a persistent LanceDB volume, and loopback-only host publishing. For an all-local Ollama stack, layer `docker-compose.ollama.yaml`:
 
 ```bash
 docker compose -f docker-compose.yaml -f docker-compose.ollama.yaml up -d
 ```
 
-Model names are still operator-selected; the overlay only supplies and
-bootstraps the local Ollama runtime.
-
-Then connect an MCP client to:
-
-```text
-http://127.0.0.1:7337/mcp
-```
-
-with:
-
-```text
-Authorization: Bearer <MEMORY_SERVER_TOKEN>
-```
-
-### Option 2 — Run the server directly
+Or run the server directly without Docker:
 
 ```bash
-npm ci
-npm run build
-
+npm ci && npm run build
 export MEMORY_EMBEDDING_API_KEY="..."
 export MEMORY_EMBEDDING_MODEL="text-embedding-3-small"
 export MEMORY_LLM_API_KEY="..."
 export MEMORY_LLM_MODEL="your-model"
 export MEMORY_SERVER_TOKEN="replace-with-a-long-random-secret"
-
 npm run memory-server
 ```
 
-For LAN/WAN binding, Host/Origin allowlists, REST examples, and provider configuration, see [docs/MEMORY_SERVER.md](docs/MEMORY_SERVER.md).
+Connect MCP clients to `http://127.0.0.1:7337/mcp` with `Authorization: Bearer <MEMORY_SERVER_TOKEN>`. For LAN/WAN binding, Host/Origin allowlists, and Coolify deployment, see [docs/MEMORY_SERVER.md](docs/MEMORY_SERVER.md) and [docs/DEPLOY_COOLIFY.md](docs/DEPLOY_COOLIFY.md).
+
+#### Step B — Enable Session/Turn Hooks for Claude Code, Codex CLI, and WorkBuddy
+
+```bash
+# 1. Build the compiled hook CLI (fast startup, no runtime transpiler needed)
+npm ci && npm run build
+
+# 2. Save server URL & token once (works for both terminal CLIs and desktop GUI clients)
+mkdir -p ~/.config/agent-memory
+cat > ~/.config/agent-memory/hook.env <<'EOF'
+MEMORY_SERVER_URL=http://127.0.0.1:7337
+MEMORY_SERVER_TOKEN=replace-with-your-memory-server-token
+EOF
+chmod 600 ~/.config/agent-memory/hook.env
+
+# 3. Preview (dry-run by default), then apply idempotently (preserves existing hooks)
+node dist/src/client/memory-hook-cli.js install claude-code --apply
+node dist/src/client/memory-hook-cli.js install codex --apply
+node dist/src/client/memory-hook-cli.js install workbuddy --apply
+
+# 4. Verify server health, env loading, state dir, and installed hooks
+node dist/src/client/memory-hook-cli.js doctor
+```
+
+#### Seamless updates
+
+- **Server**: `git pull && docker compose up -d --build` (or click **Redeploy** in Coolify). Existing LanceDB tables migrate automatically on startup (including `search_text` column creation, summary-layer backfill, and FTS index cutover) with zero manual database migration.
+- **Client hooks**: `git pull && npm run build && node dist/src/client/memory-hook-cli.js doctor` (re-run `install <host> --apply` only when new hook events are added; existing hooks are updated in place without duplicates).
 
 ## How agents should use it
 
@@ -210,14 +231,13 @@ Agent Memory is designed around a simple idea: **memory is infrastructure, not a
 
 The server combines:
 
-- semantic embeddings
-- BM25/full-text signals
+- semantic embeddings + full-layer BM25 (`search_text` indexing `text`, `l0_abstract`, `l1_overview`, and `l2_content`)
 - retrieval fusion and reranking
-- smart extraction of durable facts
-- deduplication and supersession
-- time decay and access reinforcement
-- memory tiers and lifecycle maintenance
-- global, agent, user, and project scopes
+- smart extraction with transient retry and `llmUnavailable` deferral
+- deduplication, supersession, and duplicate-ID-safe metadata updates
+- redacted LLM JSON error diagnostics (no conversation text leaked to logs)
+- time decay, access reinforcement, and scope-isolated compaction
+- memory tiers and global / agent / user / project scopes
 - canonical-memory compatibility for OpenClaw adapters
 
 The standalone server keeps those capabilities independent from any one host application's lifecycle.

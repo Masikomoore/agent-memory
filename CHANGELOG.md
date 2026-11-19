@@ -8,9 +8,10 @@ All notable public Agent Memory changes will be recorded here.
 
 - Upgraded `agent-memory-hook` with native Session/Turn Hook lifecycle handling (`handle`, `install`, `doctor`, and detached async background capture) for **Claude Code** (`~/.claude/settings.json`), **Codex CLI** (`~/.codex/hooks.json`), and **WorkBuddy** (`~/.workbuddy/settings.json`), designed to coexist with Streamable HTTP MCP.
 - Added multi-schema JSONL transcript parsing (Claude Code / WorkBuddy JSONL, Codex rollout JSONL, plus cached-prompt + `last_assistant_message` pair fallback), per-session incremental watermarks, first-run history capping, repeat-recall suppression, fail-open timeouts, and loop filtering for `<relevant-memories>` and tool outputs.
-- Added `~/.config/agent-memory/hook.env` loading (with process-env precedence and `chmod 600` permission warnings) so GUI hosts such as desktop WorkBuddy can authenticate without inheriting shell exports, while never persisting tokens into hook configs or worker task files.
+- Added `~/.config/agent-memory/hook.env` loading (with process-env precedence and `chmod 600` permission warnings) so GUI hosts can authenticate without inheriting shell exports, while never persisting tokens into hook configs or worker task files.
 - Added ready-to-use hook templates under `examples/hooks/` and updated `docs/AGENT_CLIENTS.md`.
-- Verified with `npm run verify-package-runtime`, `node scripts/verify-ci-test-manifest.mjs`, `npm run test:storage-and-schema`, `npm run test:llm-clients-and-auth`, `npm run test:cli-smoke`, `npm run test:core-regression`, and real compiled-binary detached-worker E2E coverage in `test/agent-hooks-lifecycle.test.mjs`.
+- Rewrote `README.md`, `README_CN.md`, and `examples/mcp-clients/agent-install-prompt.md` to highlight dual-track MCP + Session/Turn Hooks integration (Claude Code, Codex CLI, WorkBuddy), core engine hardening (`search_text` full-layer BM25, duplicate-ID safety, log redaction, transient retry), and seamless one-sentence Agent-assisted / manual install-and-update flows with explicit client hook inspection, non-destructive installation, and `doctor` verification.
+- Verified with `npm run verify-package-runtime`, `node scripts/verify-ci-test-manifest.mjs`, `npm run test:storage-and-schema`, `npm run test:llm-clients-and-auth`, `npm run test:cli-smoke`, `npm run test:core-regression`, `test/mcp-shared-memory-clients.test.mjs`, and real compiled-binary detached-worker E2E coverage in `test/agent-hooks-lifecycle.test.mjs`.
 
 ### Core memory engine hardening
 
@@ -24,7 +25,7 @@ All notable public Agent Memory changes will be recorded here.
 
 - Made native Streamable HTTP MCP the primary shared-memory path for Claude Code, Codex CLI, Cursor, Gemini CLI, Grok Build, VS Code agents, and other capable clients, with common server-side usage instructions.
 - Added Grok Build as a first-class Streamable HTTP MCP client with a native `config.toml` template, setup/diagnostic guidance, stable `agentId`, and regression coverage.
-- Added verified ChatOnSteroids integration guidance, including its HTTPS/loopback MCP URL boundary, stable `chat-on-steroids` identity, plugin-schema refresh behavior, and functional health/recall/capture acceptance criteria.
+- Added WorkBuddy integration guidance covering Streamable HTTP MCP and `~/.workbuddy/settings.json` Session/Turn Hooks with the stable `workbuddy` identity.
 - Added a copy/paste agent-assisted setup prompt so users can ask their existing coding agent to inspect the machine, deploy or connect Agent Memory, configure installed clients, preserve existing settings, keep credentials private, and verify real cross-client memory behavior.
 - Recorded stronger real-environment interoperability evidence: Codex capture was recalled independently by Claude Code and Grok through the same central Memory Server; Gemini's authenticated MCP initialize/tool/recall path was also verified separately from its model-provider login.
 - Documented that Gemini workspace trust/provider authentication are host-level gates separate from Agent Memory authentication, and that Grok's optional local memory is not the shared Agent Memory backend.
