@@ -1,0 +1,334 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, it } from "node:test";
+import {
+  extractAssistantReplyText,
+  onRequest,
+  onResponse,
+  resetSessionStateForTests,
+} from "../integrations/magpie/agent-memory.hooks.mjs";
+
+function makeTempDir(prefix) {
+  return mkdtempSync(path.join(tmpdir(), prefix));
+}
+
+async function withMockMemoryServer(handler, fn) {
+  const received = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    received.push({ url: req.url, auth: req.headers.authorization, body });
+    await handler(req, res, body);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    await fn({ baseUrl, received });
+  } finally {
+    server.close();
+  }
+}
+
+describe("Magpie gateway hook plugin (integrations/magpie)", () => {
+  it("satisfies Magpie GatewayOnly package manifest contract", () => {
+    const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+    const pkgDir = path.join(repoRoot, "integrations", "magpie");
+    const pkg = JSON.parse(readFileSync(path.join(pkgDir, "package.json"), "utf8"));
+    assert.equal(pkg.main, undefined, "GatewayOnly package must omit main");
+    assert.equal(pkg.exports, undefined, "GatewayOnly package must omit exports");
+    assert.equal(pkg.magpie?.hooks, "./agent-memory.hooks.mjs");
+    assert.equal(existsSync(path.join(pkgDir, pkg.magpie.hooks)), true);
+  });
+
+  it("recalls and injects across chat, responses, anthropic, and gemini without altering model/stream/tools, then captures onResponse", async () => {
+    resetSessionStateForTests();
+    const envDir = makeTempDir("magpie-hook-env-");
+    const envFile = path.join(envDir, "hook.env");
+
+    await withMockMemoryServer(
+      async (req, res) => {
+        if (req.url === "/v1/recall") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            count: 1,
+            memories: [{
+              id: "mem-1",
+              text: "Primary deployment target is Coolify on CA node.",
+              score: 0.92,
+              scope: "global",
+              metadata: { memory_category: "fact" },
+            }],
+          }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ created: 1 }));
+      },
+      async ({ baseUrl, received }) => {
+        writeFileSync(envFile, `MEMORY_SERVER_URL=${baseUrl}\nMEMORY_SERVER_TOKEN=magpie-secret\n`, { mode: 0o600 });
+
+        const cases = [
+          {
+            protocol: "chat",
+            agent: "grok",
+            session: "sess-chat",
+            body: {
+              model: "grok/grok-4.7",
+              stream: true,
+              tools: [{ type: "function", function: { name: "bash" } }],
+              messages: [
+                { role: "system", content: "You are helpful." },
+                { role: "user", content: "Where do we deploy agent-memory?" },
+              ],
+            },
+            reply: { choices: [{ message: { role: "assistant", content: "We deploy on Coolify." } }] },
+            checkInjected(mutated) {
+              assert.equal(mutated.model, "grok/grok-4.7");
+              assert.equal(mutated.stream, true);
+              assert.equal(mutated.tools.length, 1);
+              assert.equal(mutated.messages[0].content, "You are helpful.", "system prompt stays cache-stable");
+              assert.match(mutated.messages[1].content, /<relevant-memories>/);
+              assert.match(mutated.messages[1].content, /Coolify on CA node/);
+            },
+          },
+          {
+            protocol: "responses",
+            agent: "cursor",
+            session: "sess-resp",
+            body: {
+              model: "openai/gpt-5",
+              stream: true,
+              instructions: "Follow repo rules.",
+              input: [{ role: "user", content: [{ type: "input_text", text: "Remind me our deployment setup." }] }],
+            },
+            reply: {
+              output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Coolify deploys main." }] }],
+            },
+            checkInjected(mutated) {
+              assert.equal(mutated.instructions, "Follow repo rules.");
+              assert.equal(mutated.input[0].content.length, 2);
+              assert.match(mutated.input[0].content[1].text, /<relevant-memories>/);
+            },
+          },
+          {
+            protocol: "anthropic",
+            agent: "vscode",
+            session: "sess-anth",
+            body: {
+              model: "claude-sonnet-4-6",
+              stream: true,
+              system: "System prompt",
+              messages: [{ role: "user", content: [{ type: "text", text: "How is our memory service deployed?" }] }],
+            },
+            reply: {
+              content: [
+                { type: "thinking", thinking: "internal thought" },
+                { type: "text", text: "It runs via Coolify." },
+              ],
+            },
+            checkInjected(mutated) {
+              assert.equal(mutated.system, "System prompt");
+              assert.equal(mutated.messages[0].content.length, 2);
+              assert.match(mutated.messages[0].content[1].text, /Coolify on CA node/);
+            },
+          },
+          {
+            protocol: "gemini",
+            agent: "gemini-cli",
+            session: "sess-gem",
+            body: {
+              systemInstruction: { parts: [{ text: "Gemini system" }] },
+              contents: [{ role: "user", parts: [{ text: "What hosts our memory backend?" }] }],
+            },
+            reply: {
+              candidates: [{
+                content: {
+                  parts: [
+                    { text: "hidden thought", thought: true },
+                    { text: "It is hosted on Coolify." },
+                  ],
+                },
+              }],
+            },
+            checkInjected(mutated) {
+              assert.equal(mutated.systemInstruction.parts.length, 1);
+              assert.equal(mutated.contents[0].parts.length, 2);
+              assert.match(mutated.contents[0].parts[1].text, /Coolify on CA node/);
+            },
+          },
+        ];
+
+        for (const tc of cases) {
+          const reports = [];
+          const ctx = {
+            origin: "local",
+            protocol: tc.protocol,
+            agent: tc.agent,
+            session: tc.session,
+            cwd: "/work/agent-memory",
+            query: "",
+            options: { envFile },
+            state: {},
+            signal: new AbortController().signal,
+            report: (code, bytes) => reports.push({ code, bytes }),
+          };
+
+          const mutated = await onRequest(structuredClone(tc.body), ctx);
+          assert.ok(mutated, `${tc.protocol} should return mutated body`);
+          tc.checkInjected(mutated);
+          assert.equal(reports[0].code, "ready");
+          assert.ok(reports[0].bytes > 0);
+
+          await onResponse(tc.reply, { ...ctx, success: true, signal: new AbortController().signal });
+          // Duplicate onResponse with identical turn is deduplicated.
+          await onResponse(tc.reply, { ...ctx, success: true, signal: new AbortController().signal });
+        }
+
+        const captures = received.filter((r) => r.url === "/v1/capture");
+        assert.equal(captures.length, 4);
+        assert.ok(captures.every((c) => c.auth === "Bearer magpie-secret"));
+        // Verify thinking blocks were stripped in Anthropic and Gemini captures.
+        const anthCap = captures.find((c) => c.body.agentId === "vscode");
+        assert.ok(!anthCap.body.conversationText.includes("internal thought"));
+        assert.match(anthCap.body.conversationText, /It runs via Coolify/);
+        const gemCap = captures.find((c) => c.body.agentId === "gemini-cli");
+        assert.ok(!gemCap.body.conversationText.includes("hidden thought"));
+        assert.match(gemCap.body.conversationText, /hosted on Coolify/);
+      },
+    );
+
+    rmSync(envDir, { recursive: true, force: true });
+  });
+
+  it("enforces local-origin gate, skips tool continuations and already-injected client hooks, and respects skipAgents/skipCaptureAgents", async () => {
+    resetSessionStateForTests();
+    await withMockMemoryServer(
+      async (req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        if (req.url === "/v1/recall") {
+          res.end(JSON.stringify({
+            count: 1,
+            memories: [{ id: "m2", text: "Fact", score: 0.9, scope: "global" }],
+          }));
+        } else {
+          res.end(JSON.stringify({ created: 1 }));
+        }
+      },
+      async ({ baseUrl, received }) => {
+        const makeCtx = (overrides = {}) => {
+          const { options: optOverrides, ...restOverrides } = overrides;
+          const reports = [];
+          return {
+            reports,
+            ctx: {
+              origin: "local",
+              protocol: "anthropic",
+              agent: "claude-code",
+              session: "s1",
+              query: "What database are we using for telemetry?",
+              state: {},
+              signal: new AbortController().signal,
+              report: (code, bytes) => reports.push({ code, bytes }),
+              ...restOverrides,
+              options: { serverUrl: baseUrl, token: "t1", ...optOverrides },
+            },
+          };
+        };
+
+        // 1. Non-local origin is skipped by default.
+        {
+          const { ctx, reports } = makeCtx({ origin: "remote" });
+          const res = await onRequest({ messages: [{ role: "user", content: "What database are we using?" }] }, ctx);
+          assert.equal(res, undefined);
+          assert.equal(reports[0].code, "skipped");
+        }
+
+        // 2. Client already injected <relevant-memories> -> skips recall AND capture.
+        {
+          const { ctx, reports } = makeCtx();
+          const res = await onRequest({
+            messages: [{
+              role: "user",
+              content: "<relevant-memories>\n- [fact:global] Already here\n</relevant-memories>\nWhat database are we using?",
+            }],
+          }, ctx);
+          assert.equal(res, undefined);
+          assert.equal(reports[0].code, "skipped");
+          await onResponse({ content: [{ type: "text", text: "PostgreSQL." }] }, { ...ctx, success: true });
+        }
+
+        // 3. Tool-result continuation round -> skipped.
+        {
+          const { ctx, reports } = makeCtx();
+          const res = await onRequest({
+            messages: [{
+              role: "user",
+              content: [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }],
+            }],
+          }, ctx);
+          assert.equal(res, undefined);
+          assert.equal(reports[0].code, "skipped");
+        }
+
+        // 4. skipAgents skips recall & capture.
+        {
+          const { ctx, reports } = makeCtx({ options: { skipAgents: ["claude-code"] } });
+          const res = await onRequest({ messages: [{ role: "user", content: "What database are we using?" }] }, ctx);
+          assert.equal(res, undefined);
+          assert.equal(reports[0].code, "skipped");
+        }
+
+        assert.equal(received.length, 0, "none of the guarded requests should hit the memory server");
+
+        // 5. skipCaptureAgents matches both Magpie short ID ("claude" / "agy") and canonical ID ("claude-code" / "antigravity-cli").
+        {
+          const { ctx, reports } = makeCtx({ agent: "claude", options: { skipCaptureAgents: ["claude-code"] } });
+          const res = await onRequest({ messages: [{ role: "user", content: "What database are we using?" }] }, ctx);
+          assert.ok(res);
+          assert.equal(reports[0].code, "ready");
+          await onResponse({ content: [{ type: "text", text: "ClickHouse." }] }, { ...ctx, success: true });
+          const recalls = received.filter((r) => r.url === "/v1/recall");
+          assert.equal(recalls.length, 1);
+          assert.equal(recalls[0].body.agentId, "claude-code");
+          assert.equal(received.filter((r) => r.url === "/v1/capture").length, 0);
+        }
+      },
+    );
+  });
+
+  it("reports unauthorized on HTTP 401 and fails open cleanly", async () => {
+    resetSessionStateForTests();
+    await withMockMemoryServer(
+      async (_req, res) => {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+      },
+      async ({ baseUrl }) => {
+        const reports = [];
+        const res = await onRequest(
+          { messages: [{ role: "user", content: "How should we rotate our API keys?" }] },
+          {
+            origin: "local",
+            protocol: "chat",
+            agent: "grok",
+            session: "s-unauth",
+            query: "How should we rotate our API keys?",
+            options: { serverUrl: baseUrl },
+            state: {},
+            signal: new AbortController().signal,
+            report: (code, bytes) => reports.push({ code, bytes }),
+          },
+        );
+        assert.equal(res, undefined);
+        assert.equal(reports[0].code, "unauthorized");
+      },
+    );
+
+    assert.equal(extractAssistantReplyText("chat", { choices: [{ message: { content: "Hello" } }] }), "Hello");
+  });
+});

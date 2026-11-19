@@ -1,0 +1,11 @@
+{
+  "name": "agent-memory-magpie-hooks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Magpie asynchronous gateway hook plugin for Agent Memory Server (auto-recall onRequest + fire-and-forget capture onResponse across Chat, Responses, Anthropic, and Gemini protocols).",
+  "license": "MIT",
+  "magpie": {
+    "hooks": "./agent-memory.hooks.mjs"
+  }
+}

@@ -4,6 +4,13 @@ All notable public Agent Memory changes will be recorded here.
 
 ## Unreleased
 
+### Magpie Gateway Hook Plugin
+
+- Added a standalone, zero-dependency [Magpie](https://github.com/yetone/magpie) asynchronous gateway hook plugin under [`integrations/magpie`](integrations/magpie/README.md) (`package.json` `magpie.hooks` entry with `GatewayOnly` compatibility and `agent-memory.hooks.mjs`).
+- Supports `onRequest` bounded pre-request recall across all 4 Magpie gateway protocols (`chat`, `responses`, `anthropic`, `gemini`) by appending `<relevant-memories>` to the latest user turn (preserving system/prefix prompt caching and never mutating `model`, `stream`, `tools`, or `tool_choice`), plus fire-and-forget `onResponse` capture with content-hash deduplication and thinking/tool-block stripping.
+- Enforces Magpie's `ctx.origin === "local"` privacy default (`allowNonLocal: false`), automatically skips tool-continuation rounds and requests already carrying `<relevant-memories>` from client-side hooks, maps Magpie agent IDs (`claude`, `agy`, etc.) cleanly to canonical Agent Memory `agentId`s, and reuses `~/.config/agent-memory/hook.env` (`chmod 600`) without duplicating secrets.
+- Verified with `test/magpie-gateway-plugin.test.mjs`, `scripts/verify-ci-test-manifest.mjs`, and real local `magpie plugin add` + `magpie plugin options` + `magpie plugin list` loading.
+
 ### Session & Turn Hooks for Claude Code, Codex CLI, WorkBuddy, Grok Build, Antigravity CLI, Cursor, and Hermes Agent
 
 - Upgraded `agent-memory-hook` with native Session/Turn Hook lifecycle handling (`handle`, `install`, `doctor`, and detached async background capture) for **Claude Code** (`~/.claude/settings.json`), **Codex CLI** (`~/.codex/hooks.json`), **WorkBuddy** (`~/.workbuddy/settings.json`), **Grok Build** (`~/.grok/hooks/agent-memory.json`), **Antigravity CLI** (`~/.gemini/config/hooks.json`, alias `agy`), **Cursor** (`~/.cursor/hooks.json`), and **Hermes Agent** (`~/.hermes/config.yaml`), designed to coexist with Streamable HTTP MCP.

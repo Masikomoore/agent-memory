@@ -171,6 +171,7 @@ export const CI_TEST_MANIFEST = [
   { group: "core-regression", runner: "node", file: "test/extraction-transient-retry.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/memory-hook-cli.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/agent-hooks-lifecycle.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/magpie-gateway-plugin.test.mjs", args: ["--test"] },
 ];
 
 export function getEntriesForGroup(group) {

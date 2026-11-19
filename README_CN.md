@@ -87,6 +87,7 @@ OpenClaw ──────┘                            ├─ 衰减 / 强化
 | OpenClaw | REST 远程模式 | 原生生命周期插件（`memory.mode: "remote"`） | ✅ 自动化集成覆盖 |
 | Gemini CLI | Streamable HTTP `/mcp` | — | ✅ 带认证 MCP 传输验证 |
 | VS Code | Streamable HTTP `/mcp` | — | 🧩 配置模板就绪 |
+| Magpie 网关（所有经网关路由的客户端） | — | 异步网关钩子插件（[`integrations/magpie`](integrations/magpie/README.md)） | ✅ 真机加载验证（`magpie plugin add`） |
 
 详细接入说明见 [docs/AGENT_CLIENTS.md](docs/AGENT_CLIENTS.md)。
 

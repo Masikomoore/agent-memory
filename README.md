@@ -95,6 +95,7 @@ Current integration status:
 | Gemini CLI | Streamable HTTP `/mcp` | — | ✅ authenticated MCP transport verified |
 | VS Code agents | Streamable HTTP `/mcp` | — | 🧩 config template ready |
 | Any MCP / Hook client | `/mcp` | `agent-memory-hook recall/capture/health` | 🧩 protocol-compatible |
+| Magpie Gateway (all routed agents) | — | Async Gateway Hook Plugin ([`integrations/magpie`](integrations/magpie/README.md)) | ✅ real-environment verified (`magpie plugin add`) |
 
 See [docs/AGENT_CLIENTS.md](docs/AGENT_CLIENTS.md) for full MCP and Session/Turn Hook setup guides.
 
