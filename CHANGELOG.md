@@ -4,6 +4,22 @@ All notable public Agent Memory changes will be recorded here.
 
 ## Unreleased
 
+### Session & Turn Hooks for Claude Code, Codex CLI, and WorkBuddy
+
+- Upgraded `agent-memory-hook` with native Session/Turn Hook lifecycle handling (`handle`, `install`, `doctor`, and detached async background capture) for **Claude Code** (`~/.claude/settings.json`), **Codex CLI** (`~/.codex/hooks.json`), and **WorkBuddy** (`~/.workbuddy/settings.json`), designed to coexist with Streamable HTTP MCP.
+- Added multi-schema JSONL transcript parsing (Claude Code / WorkBuddy JSONL, Codex rollout JSONL, plus cached-prompt + `last_assistant_message` pair fallback), per-session incremental watermarks, first-run history capping, repeat-recall suppression, fail-open timeouts, and loop filtering for `<relevant-memories>` and tool outputs.
+- Added `~/.config/agent-memory/hook.env` loading (with process-env precedence and `chmod 600` permission warnings) so GUI hosts such as desktop WorkBuddy can authenticate without inheriting shell exports, while never persisting tokens into hook configs or worker task files.
+- Added ready-to-use hook templates under `examples/hooks/` and updated `docs/AGENT_CLIENTS.md`.
+- Verified with `npm run verify-package-runtime`, `node scripts/verify-ci-test-manifest.mjs`, `npm run test:storage-and-schema`, `npm run test:llm-clients-and-auth`, `npm run test:cli-smoke`, `npm run test:core-regression`, and real compiled-binary detached-worker E2E coverage in `test/agent-hooks-lifecycle.test.mjs`.
+
+### Core memory engine hardening
+
+- Indexed BM25 full-text search on a derived `search_text` column covering `text` plus `l0_abstract`, `l1_overview`, and `l2_content`, with automatic schema migration, backfill, and the `backfill-search-text` maintenance command.
+- Hardened duplicate-ID handling in `MemoryStore.applyManualRecallMetadataBatch` and `backfillSearchText` so sibling physical rows keep their distinct vectors and metadata intact.
+- Redacted raw LLM response text and quoted `JSON.parse` snippets from `completeJson()` failure diagnostics across all transports, and added `LlmClient.completeText()`.
+- Enforced per-scope isolation in `memory-compactor.ts` so similarity clusters never merge entries across scopes.
+- Added single transient retry and `ExtractionStats.llmUnavailable` distinction in `SmartExtractor` so temporary upstream LLM outages defer instead of failing closed.
+
 ### Universal agent client integration
 
 - Made native Streamable HTTP MCP the primary shared-memory path for Claude Code, Codex CLI, Cursor, Gemini CLI, Grok Build, VS Code agents, and other capable clients, with common server-side usage instructions.

@@ -46,6 +46,7 @@ Use a stable logical `agentId` per client, for example:
 | Gemini CLI | `gemini-cli` |
 | Grok Build | `grok` |
 | ChatOnSteroids | `chat-on-steroids` |
+| WorkBuddy | `workbuddy` |
 | VS Code agent | `vscode` |
 
 The server remains authoritative for scope ACLs. Leaving `scope` unset uses the normal shared/default scope policy.
@@ -194,40 +195,62 @@ Existing top-level `autoRecall`, `autoCapture`, `captureAssistant`, `autoRecallM
 
 Remote `autoRecall` uses OpenClaw's pre-prompt lifecycle to inject bounded, untrusted historical notes. Remote `autoCapture` submits the completed conversation to `/v1/capture`; the central server then decides whether anything deserves long-term storage.
 
-## Generic lifecycle-hook bridge
+## Session & Turn Hooks (`agent-memory-hook`)
 
-Use the `agent-memory-hook` executable when a host exposes lifecycle scripts/hooks but does not have a better native way to perform automatic memory calls. It is intentionally thin and reuses the same REST API as the OpenClaw remote adapter.
+For hosts that support native lifecycle hooks — currently **Claude Code**, **Codex CLI**, and **WorkBuddy** — `agent-memory-hook` pairs cleanly with Streamable HTTP MCP in a **dual-track setup**:
 
-Configure the connection once in the hook environment:
+- **Hooks (automatic background lifecycle)**: `UserPromptSubmit` runs a fast, bounded `auto-recall` (fail-open, repeat-suppressed, short-prompt skipped) and injects `<relevant-memories>` via `hookSpecificOutput.additionalContext`; `Stop` / `PreCompact` / `SessionEnd` spawn a detached background worker that parses only the newly added turns from `transcript_path` (filtering out `tool_use` / `tool_result` / `<relevant-memories>` blocks to avoid feedback loops) and posts them to `/v1/capture` using the server's shared default scope.
+- **MCP (on-demand explicit control)**: keeps `memory_recall` / `memory_capture` / `memory_health` available when the agent needs deeper search or explicit storage.
+
+### 1. Configure credentials once
+
+Interactive shells can export `MEMORY_SERVER_URL` and `MEMORY_SERVER_TOKEN`. For GUI hosts (especially desktop **WorkBuddy**) that do not inherit shell rc exports, store them in `~/.config/agent-memory/hook.env` (see [`examples/hooks/hook.env.example`](../examples/hooks/hook.env.example)):
 
 ```bash
-export MEMORY_SERVER_URL="http://127.0.0.1:7337"
-export MEMORY_SERVER_TOKEN="..."
-export MEMORY_AGENT_ID="my-agent"
-# Optional: export MEMORY_SCOPE="project:agentmemory"
+mkdir -p ~/.config/agent-memory
+cat > ~/.config/agent-memory/hook.env <<'EOF'
+MEMORY_SERVER_URL=http://127.0.0.1:7337
+MEMORY_SERVER_TOKEN=replace-with-your-memory-server-token
+EOF
+chmod 600 ~/.config/agent-memory/hook.env
 ```
 
-For a pre-turn hook, send the user prompt on stdin. The default output is a bounded `<relevant-memories>` block suitable for context injection:
+Process environment variables always override `hook.env`. Tokens are never written into hook config files or background worker task files.
+
+### 2. Install hooks for Claude Code, Codex CLI, or WorkBuddy
+
+`install` previews the non-destructive merge by default (`--dry-run`) and writes atomically when `--apply` is passed:
+
+```bash
+# Preview changes (default dry-run)
+agent-memory-hook install claude-code
+agent-memory-hook install codex
+agent-memory-hook install workbuddy
+
+# Apply to user-level configs:
+# - Claude Code: ~/.claude/settings.json
+# - Codex CLI:   ~/.codex/hooks.json (strict Codex schema, no unsupported fields)
+# - WorkBuddy:   ~/.workbuddy/settings.json
+agent-memory-hook install claude-code --apply
+agent-memory-hook install codex --apply
+agent-memory-hook install workbuddy --apply
+
+# Verify server reachability, env loading, state dir, and installed hooks
+agent-memory-hook doctor
+```
+
+Use `--project` to write into the current workspace (`.claude/settings.local.json`, `.codex/hooks.json`, `.workbuddy/settings.local.json`), or `--uninstall --apply` to cleanly remove only Agent Memory entries while preserving all other host settings and hooks. Reference templates also live under [`examples/hooks`](../examples/hooks).
+
+### 3. Generic plain-text REST bridge
+
+When integrating another host that only pipes plain text into scripts, the low-level subcommands remain available:
 
 ```bash
 printf '%s' "$CURRENT_PROMPT" | agent-memory-hook recall --limit 3
-```
-
-For a post-turn or session-end hook, send the conversation transcript on stdin. The bridge does not extract or classify memory locally:
-
-```bash
 printf '%s' "$CONVERSATION_TRANSCRIPT" | \
   agent-memory-hook capture --session-key "$SESSION_KEY"
-```
-
-Operational checks can call:
-
-```bash
 agent-memory-hook health
-agent-memory-hook recall --query "What did we decide about the memory architecture?" --json
 ```
-
-Prefer native MCP for ordinary agent tool use and the host's native lifecycle integration where available. The bridge exists to avoid writing a separate memory SDK for every hook system. Hook systems that send structured JSON on stdin should extract the documented prompt/transcript field before piping text into this bridge, or wrap the bridge with a very small host-specific script.
 
 ## Cross-agent verification
 

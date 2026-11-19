@@ -162,6 +162,15 @@ export const CI_TEST_MANIFEST = [
   { group: "core-regression", runner: "node", file: "test/consolidate-cli-apply-exit-status.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/invalidated-rows-visibility.test.mjs", args: ["--test"] },
   { group: "core-regression", runner: "node", file: "test/store-excludeinactive-default.test.mjs", args: ["--test"] },
+  { group: "storage-and-schema", runner: "node", file: "test/fts-search-text-column.test.mjs", args: ["--test"] },
+  { group: "storage-and-schema", runner: "node", file: "test/backfill-search-text-duplicate-ids.test.mjs", args: ["--test"] },
+  { group: "storage-and-schema", runner: "node", file: "test/manual-recall-duplicate-ids.test.mjs", args: ["--test"] },
+  { group: "llm-clients-and-auth", runner: "node", file: "test/llm-json-error-redaction.test.mjs", args: ["--test"] },
+  { group: "llm-clients-and-auth", runner: "node", file: "test/host-runtime-lifecycle-error.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/compaction-scope-isolation.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/extraction-transient-retry.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/memory-hook-cli.test.mjs", args: ["--test"] },
+  { group: "core-regression", runner: "node", file: "test/agent-hooks-lifecycle.test.mjs", args: ["--test"] },
 ];
 
 export function getEntriesForGroup(group) {
