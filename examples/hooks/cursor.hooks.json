@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "agent-memory-hook handle --host cursor",
+        "timeout": 5
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "agent-memory-hook handle --host cursor",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "agent-memory-hook handle --host cursor",
+        "timeout": 5
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "agent-memory-hook handle --host cursor",
+        "timeout": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "agent-memory-hook handle --host cursor",
+        "timeout": 10
+      }
+    ]
+  }
+}

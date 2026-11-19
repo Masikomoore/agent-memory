@@ -594,8 +594,10 @@ describe("agent-memory-hook install and doctor for Claude Code, Codex, and WorkB
       const report = JSON.parse(doctorOut.text());
       assert.equal(report.tokenConfigured, true);
       assert.equal(report.serverHealth.ok, true);
-      assert.equal(report.hosts.length, 3);
-      for (const item of report.hosts) {
+      assert.equal(report.hosts.length, 7);
+      for (const hostName of ["claude-code", "codex", "workbuddy"]) {
+        const item = report.hosts.find((h) => h.host === hostName);
+        assert.ok(item, `missing ${hostName} in doctor report`);
         assert.ok(item.userInstalledEvents.includes("UserPromptSubmit"));
         assert.ok(item.userInstalledEvents.includes("Stop"));
       }
@@ -721,5 +723,559 @@ describe("agent-memory-hook install and doctor for Claude Code, Codex, and WorkB
       server.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("agent-memory-hook support for Grok, Antigravity CLI, Cursor, and Hermes", () => {
+  it("handles Antigravity CLI PreInvocation (with invocationNum dedup), transcript capture, and always returns valid JSON", async () => {
+    const homeDir = makeTempDir("hook-agy-");
+    const stateDir = path.join(homeDir, "state");
+    const transcriptPath = path.join(homeDir, "transcript.jsonl");
+    writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({ type: "USER_INPUT", source: "SYSTEM", content: "System bootstrap message" }),
+        JSON.stringify({ type: "USER_INPUT", source: "USER_EXPLICIT", content: "We moved the search index to LanceDB." }),
+        JSON.stringify({ type: "PLANNER_RESPONSE", content: "", tool_calls: [{ name: "run_command" }] }),
+        JSON.stringify({ type: "PLANNER_RESPONSE", content: "Got it, LanceDB is now our vector + FTS index." }),
+      ].join("\n") + "\n",
+      "utf8",
+    );
+
+    let recallCount = 0;
+    const capturedCalls = [];
+    const createClient = () => ({
+      baseUrl: "http://127.0.0.1:7337",
+      async health() { return { status: "ok" }; },
+      async recall(req) {
+        recallCount += 1;
+        return {
+          count: 1,
+          memories: [{
+            id: "mem-agy-1",
+            text: `Memory for ${req.agentId}: always run npm run verify-package-runtime.`,
+            score: 0.91,
+            scope: "global",
+            metadata: { memory_category: "fact" },
+          }],
+        };
+      },
+      async capture(req) {
+        capturedCalls.push(req);
+        return { created: 1 };
+      },
+    });
+
+    try {
+      // 1. PreInvocation (invocationNum=1) recalls and emits injectSteps.systemMessage.systemMessage.
+      const pre1Out = outputCollector();
+      const pre1Code = await runMemoryHookCli(
+        ["handle", "--host", "agy", "--state-dir", stateDir],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hookEventName: "PreInvocation",
+            conversationId: "conv-agy-1",
+            workspacePaths: ["/tmp/proj"],
+            transcriptPath,
+            lastUserInput: "How should we verify builds before pushing?",
+            invocationNum: 1,
+          })]),
+          stdout: pre1Out.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(pre1Code, 0);
+      assert.equal(recallCount, 1);
+      const pre1Json = JSON.parse(pre1Out.text());
+      assert.equal(Array.isArray(pre1Json.injectSteps), true);
+      assert.match(pre1Json.injectSteps[0].systemMessage.systemMessage, /verify-package-runtime/);
+
+      // 2. PreInvocation (invocationNum=2) inside same tool loop skips repeat recall and emits {}.
+      const pre2Out = outputCollector();
+      const pre2Code = await runMemoryHookCli(
+        ["handle", "--host", "antigravity-cli", "--state-dir", stateDir],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hookEventName: "PreInvocation",
+            conversationId: "conv-agy-1",
+            workspacePaths: ["/tmp/proj"],
+            transcriptPath,
+            lastUserInput: "How should we verify builds before pushing?",
+            invocationNum: 2,
+          })]),
+          stdout: pre2Out.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(pre2Code, 0);
+      assert.equal(recallCount, 1, "invocationNum > 1 with same prompt must skip redundant recall");
+      assert.deepEqual(JSON.parse(pre2Out.text()), {});
+
+      // 3. Stop captures Antigravity USER_INPUT/PLANNER_RESPONSE turns (skipping SYSTEM) and emits {"decision":""}.
+      const stopOut = outputCollector();
+      const stopCode = await runMemoryHookCli(
+        ["handle", "--host", "antigravity-cli", "--state-dir", stateDir, "--sync"],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hookEventName: "Stop",
+            conversationId: "conv-agy-1",
+            transcriptPath,
+            terminationReason: "NO_TOOL_CALL",
+            continuationActive: false,
+          })]),
+          stdout: stopOut.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(stopCode, 0);
+      assert.deepEqual(JSON.parse(stopOut.text()), { decision: "" });
+      assert.equal(capturedCalls.length, 1);
+      assert.equal(capturedCalls[0].agentId, "antigravity-cli");
+      assert.match(capturedCalls[0].conversationText, /search index to LanceDB/);
+      assert.ok(!capturedCalls[0].conversationText.includes("System bootstrap message"));
+
+      // 4. Fail-open on missing env file still emits valid JSON for Antigravity CLI.
+      const errOut = outputCollector();
+      const errCode = await runMemoryHookCli(
+        ["handle", "--host", "antigravity-cli", "--env-file", path.join(homeDir, "missing.env")],
+        {},
+        {
+          stdin: Readable.from([JSON.stringify({ hookEventName: "PreInvocation", conversationId: "c2", lastUserInput: "test" })]),
+          stdout: errOut.stream,
+        },
+        { homeDir },
+      );
+      assert.equal(errCode, 0);
+      assert.deepEqual(JSON.parse(errOut.text()), {});
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("handles Cursor sessionStart recall, beforeSubmitPrompt always-continue, and stop capture", async () => {
+    const homeDir = makeTempDir("hook-cursor-");
+    const stateDir = path.join(homeDir, "state");
+    const capturedCalls = [];
+    const recallQueries = [];
+
+    const createClient = () => ({
+      baseUrl: "http://127.0.0.1:7337",
+      async health() { return { status: "ok" }; },
+      async recall(req) {
+        recallQueries.push(req.query);
+        return {
+          count: 1,
+          memories: [{
+            id: "mem-cur-1",
+            text: "Use pnpm workspaces in payments-api.",
+            score: 0.88,
+            scope: "global",
+            metadata: { memory_category: "fact" },
+          }],
+        };
+      },
+      async capture(req) {
+        capturedCalls.push(req);
+        return { created: 1 };
+      },
+    });
+
+    try {
+      // 1. sessionStart injects additional_context using project directory name.
+      const startOut = outputCollector();
+      const startCode = await runMemoryHookCli(
+        ["handle", "--host", "cursor", "--state-dir", stateDir],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "sessionStart",
+            conversation_id: "cur-conv-1",
+            workspace_roots: ["/work/payments-api"],
+          })]),
+          stdout: startOut.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(startCode, 0);
+      const startJson = JSON.parse(startOut.text());
+      assert.match(startJson.additional_context, /pnpm workspaces/);
+      assert.match(recallQueries[0], /payments-api/);
+
+      // 2. beforeSubmitPrompt on short greeting skips recall yet STILL emits {"continue":true}.
+      const shortOut = outputCollector();
+      const shortCode = await runMemoryHookCli(
+        ["handle", "--host", "cursor", "--state-dir", stateDir],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "beforeSubmitPrompt",
+            conversation_id: "cur-conv-1",
+            prompt: "ok",
+          })]),
+          stdout: shortOut.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(shortCode, 0);
+      assert.deepEqual(JSON.parse(shortOut.text()), { continue: true });
+
+      // 3. beforeSubmitPrompt on real prompt caches prompt and emits {"continue":true,...} even on fail-open server error.
+      const failOut = outputCollector();
+      const failCode = await runMemoryHookCli(
+        ["handle", "--host", "cursor", "--state-dir", stateDir],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "beforeSubmitPrompt",
+            conversation_id: "cur-conv-1",
+            prompt: "Remember we switched billing retries to exponential backoff.",
+          })]),
+          stdout: failOut.stream,
+        },
+        {
+          homeDir,
+          createClient: () => ({
+            baseUrl: "http://127.0.0.1:7337",
+            async health() { throw new Error("down"); },
+            async recall() { throw new Error("down"); },
+            async capture() { throw new Error("down"); },
+          }),
+        },
+      );
+      assert.equal(failCode, 0);
+      assert.deepEqual(JSON.parse(failOut.text()), { continue: true });
+
+      // 4. afterAgentResponse / stop captures fallback pair and emits {}.
+      const stopOut = outputCollector();
+      const stopCode = await runMemoryHookCli(
+        ["handle", "--host", "cursor", "--state-dir", stateDir, "--sync"],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "afterAgentResponse",
+            conversation_id: "cur-conv-1",
+            text: "Noted — billing retries now use exponential backoff.",
+          })]),
+          stdout: stopOut.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(stopCode, 0);
+      assert.deepEqual(JSON.parse(stopOut.text()), {});
+      assert.equal(capturedCalls.length, 1);
+      assert.equal(capturedCalls[0].agentId, "cursor");
+      assert.match(capturedCalls[0].conversationText, /exponential backoff/);
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("handles Hermes pre_llm_call (context output), post_llm_call direct pair capture, and on_session_finalize", async () => {
+    const homeDir = makeTempDir("hook-hermes-");
+    const stateDir = path.join(homeDir, "state");
+    const capturedCalls = [];
+
+    const createClient = () => ({
+      baseUrl: "http://127.0.0.1:7337",
+      async health() { return { status: "ok" }; },
+      async recall() {
+        return {
+          count: 1,
+          memories: [{
+            id: "mem-h1",
+            text: "Prefer PostgreSQL 16 for production analytics.",
+            score: 0.94,
+            scope: "global",
+            metadata: { memory_category: "preference" },
+          }],
+        };
+      },
+      async capture(req) {
+        capturedCalls.push(req);
+        return { created: 1 };
+      },
+    });
+
+    try {
+      // 1. pre_llm_call reads extra.user_message and outputs {"context": "..."}.
+      const preOut = outputCollector();
+      const preCode = await runMemoryHookCli(
+        ["handle", "--host", "hermes", "--state-dir", stateDir],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "pre_llm_call",
+            session_id: "hermes-sess-1",
+            cwd: "/tmp/app",
+            extra: {
+              user_message: "Which database should we provision for analytics?",
+              is_first_turn: true,
+            },
+          })]),
+          stdout: preOut.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(preCode, 0);
+      const preJson = JSON.parse(preOut.text());
+      assert.match(preJson.context, /PostgreSQL 16/);
+
+      // 2. post_llm_call captures directly from extra.user_message + extra.assistant_response with silent stdout.
+      const postOut = outputCollector();
+      const postCode = await runMemoryHookCli(
+        ["handle", "--host", "hermes", "--state-dir", stateDir, "--sync"],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "post_llm_call",
+            session_id: "hermes-sess-1",
+            cwd: "/tmp/app",
+            extra: {
+              user_message: "Let's deploy the worker on Fly.io in sin region.",
+              assistant_response: "Done, Fly.io sin region is configured.",
+            },
+          })]),
+          stdout: postOut.stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(postCode, 0);
+      assert.equal(postOut.text(), "");
+      assert.equal(capturedCalls.length, 1);
+      assert.equal(capturedCalls[0].agentId, "hermes");
+      assert.match(capturedCalls[0].conversationText, /Fly\.io in sin region/);
+      assert.match(capturedCalls[0].conversationText, /sin region is configured/);
+
+      // 3. on_session_finalize removes local session state file.
+      const stateFile = sessionStateFilePath(stateDir, "hermes", "hermes:hermes-sess-1");
+      assert.equal(existsSync(stateFile), true);
+      const finCode = await runMemoryHookCli(
+        ["handle", "--host", "hermes", "--state-dir", stateDir, "--sync"],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        {
+          stdin: Readable.from([JSON.stringify({
+            hook_event_name: "on_session_finalize",
+            session_id: "hermes-sess-1",
+            extra: { reason: "shutdown" },
+          })]),
+          stdout: outputCollector().stream,
+        },
+        { createClient, homeDir },
+      );
+      assert.equal(finCode, 0);
+      assert.equal(existsSync(stateFile), false);
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs, preserves existing configs, inspects via doctor, and uninstalls cleanly for Grok, Antigravity CLI, Cursor, and Hermes", async () => {
+    const homeDir = makeTempDir("hook-new4-home-");
+    const cwd = makeTempDir("hook-new4-cwd-");
+    try {
+      // Seed Antigravity hooks.json with existing sibling named hook `orca-status`.
+      const agyPath = path.join(homeDir, ".gemini", "config", "hooks.json");
+      mkdirSync(path.dirname(agyPath), { recursive: true });
+      writeFileSync(
+        agyPath,
+        JSON.stringify({
+          "orca-status": {
+            PreInvocation: [{ type: "command", command: "/bin/true", timeout: 10 }],
+          },
+        }, null, 2),
+        "utf8",
+      );
+
+      // Seed Cursor hooks.json with version: 1 and an existing custom hook.
+      const cursorPath = path.join(homeDir, ".cursor", "hooks.json");
+      mkdirSync(path.dirname(cursorPath), { recursive: true });
+      writeFileSync(
+        cursorPath,
+        JSON.stringify({
+          version: 1,
+          hooks: {
+            beforeSubmitPrompt: [{ command: "/bin/echo custom", timeout: 10 }],
+          },
+        }, null, 2),
+        "utf8",
+      );
+
+      // Seed Hermes config.yaml with comments, unrelated sections, hooks.output_spill, and custom pre_tool_call.
+      const hermesPath = path.join(homeDir, ".hermes", "config.yaml");
+      mkdirSync(path.dirname(hermesPath), { recursive: true });
+      writeFileSync(
+        hermesPath,
+        [
+          "# Top comment stays intact",
+          "model: claude-sonnet-4-6",
+          "hooks:",
+          "  output_spill:",
+          "    max_chars: 16000",
+          "  pre_tool_call:",
+          "    - command: /usr/local/bin/my-guard.sh",
+          "      timeout: 10",
+          "hooks_auto_accept: false",
+          "personalities: {}",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      // Install all 4 new hosts (including `agy` alias for antigravity-cli).
+      for (const host of ["grok", "agy", "cursor", "hermes"]) {
+        const out = outputCollector();
+        const code = await runMemoryHookCli(
+          ["install", host, "--command", "agent-memory-hook", "--apply", "--json"],
+          {},
+          { stdout: out.stream },
+          { homeDir, cwd },
+        );
+        assert.equal(code, 0);
+        const res = JSON.parse(out.text());
+        assert.equal(res.applied, true);
+        assert.equal(res.changed, true);
+      }
+
+      // Verify Grok drop-in JSON (~/.grok/hooks/agent-memory.json): no matcher, no async.
+      const grokPath = path.join(homeDir, ".grok", "hooks", "agent-memory.json");
+      const grokCfg = JSON.parse(readFileSync(grokPath, "utf8"));
+      assert.deepEqual(
+        Object.keys(grokCfg.hooks).sort(),
+        ["PreCompact", "SessionEnd", "Stop", "UserPromptSubmit"],
+      );
+      assert.equal("matcher" in grokCfg.hooks.UserPromptSubmit[0], false);
+      assert.equal("async" in grokCfg.hooks.Stop[0].hooks[0], false);
+
+      // Verify Antigravity CLI preserved `orca-status` and wrote flat `agent-memory` events.
+      const agyCfg = JSON.parse(readFileSync(agyPath, "utf8"));
+      assert.ok(agyCfg["orca-status"].PreInvocation.length === 1);
+      assert.deepEqual(
+        Object.keys(agyCfg["agent-memory"]).sort(),
+        ["PreInvocation", "SessionStart", "Stop"],
+      );
+      assert.equal(agyCfg["agent-memory"].PreInvocation[0].type, "command");
+
+      // Verify Cursor kept version: 1, existing custom hook, and flat entries.
+      const cursorCfg = JSON.parse(readFileSync(cursorPath, "utf8"));
+      assert.equal(cursorCfg.version, 1);
+      assert.equal(cursorCfg.hooks.beforeSubmitPrompt.length, 2);
+      assert.equal(cursorCfg.hooks.beforeSubmitPrompt[0].command, "/bin/echo custom");
+      assert.equal("hooks" in cursorCfg.hooks.beforeSubmitPrompt[1], false);
+
+      // Verify Hermes config.yaml preserved comments, model, output_spill, pre_tool_call, hooks_auto_accept, personalities.
+      const hermesYaml = readFileSync(hermesPath, "utf8");
+      assert.match(hermesYaml, /^# Top comment stays intact/m);
+      assert.match(hermesYaml, /^model: claude-sonnet-4-6$/m);
+      assert.match(hermesYaml, /^  output_spill:\n    max_chars: 16000$/m);
+      assert.match(hermesYaml, /^  pre_tool_call:\n    - command: \/usr\/local\/bin\/my-guard\.sh/m);
+      assert.match(hermesYaml, /^  pre_llm_call:\n    - command: "agent-memory-hook handle --host hermes"/m);
+      assert.match(hermesYaml, /^  post_llm_call:\n    - command: "agent-memory-hook handle --host hermes"/m);
+      assert.match(hermesYaml, /^  on_session_finalize:\n    - command: "agent-memory-hook handle --host hermes"/m);
+      assert.match(hermesYaml, /^hooks_auto_accept: false$/m);
+      assert.match(hermesYaml, /^personalities: \{\}$/m);
+
+      // Idempotence check across all 4 hosts.
+      for (const host of ["grok", "antigravity-cli", "cursor", "hermes"]) {
+        const rerunOut = outputCollector();
+        const rerunCode = await runMemoryHookCli(
+          ["install", host, "--command", "agent-memory-hook", "--apply", "--json"],
+          {},
+          { stdout: rerunOut.stream },
+          { homeDir, cwd },
+        );
+        assert.equal(rerunCode, 0);
+        assert.equal(JSON.parse(rerunOut.text()).changed, false, `${host} reinstall must be idempotent`);
+      }
+
+      // Doctor reports all 4 installed hosts and Hermes pending allowlist note.
+      const doctorOut = outputCollector();
+      const doctorCode = await runMemoryHookCli(
+        ["doctor", "--json"],
+        { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+        { stdout: doctorOut.stream },
+        {
+          homeDir,
+          cwd,
+          createClient: () => ({
+            baseUrl: "http://127.0.0.1:7337",
+            async health() { return { status: "ok", memories: 10, captureEnabled: true }; },
+            async recall() { return { count: 0, memories: [] }; },
+            async capture() { return { created: 0 }; },
+          }),
+        },
+      );
+      assert.equal(doctorCode, 0);
+      const report = JSON.parse(doctorOut.text());
+      const byHost = Object.fromEntries(report.hosts.map((h) => [h.host, h]));
+      assert.deepEqual(byHost.grok.userInstalledEvents.sort(), ["PreCompact", "SessionEnd", "Stop", "UserPromptSubmit"]);
+      assert.deepEqual(byHost["antigravity-cli"].userInstalledEvents.sort(), ["PreInvocation", "SessionStart", "Stop"]);
+      assert.deepEqual(
+        byHost.cursor.userInstalledEvents.sort(),
+        ["beforeSubmitPrompt", "preCompact", "sessionEnd", "sessionStart", "stop"],
+      );
+      assert.deepEqual(
+        byHost.hermes.userInstalledEvents.sort(),
+        ["on_session_finalize", "post_llm_call", "pre_llm_call"],
+      );
+      assert.match(byHost.hermes.notes[0], /allowlist pending/i);
+
+      // Uninstall all 4 hosts and confirm non-managed config stays intact.
+      for (const host of ["grok", "antigravity-cli", "cursor", "hermes"]) {
+        const unOut = outputCollector();
+        const unCode = await runMemoryHookCli(
+          ["install", host, "--uninstall", "--apply", "--json"],
+          {},
+          { stdout: unOut.stream },
+          { homeDir, cwd },
+        );
+        assert.equal(unCode, 0);
+      }
+
+      assert.deepEqual(JSON.parse(readFileSync(agyPath, "utf8")), {
+        "orca-status": {
+          PreInvocation: [{ type: "command", command: "/bin/true", timeout: 10 }],
+        },
+      });
+      assert.deepEqual(JSON.parse(readFileSync(cursorPath, "utf8")), {
+        version: 1,
+        hooks: {
+          beforeSubmitPrompt: [{ command: "/bin/echo custom", timeout: 10 }],
+        },
+      });
+      const hermesAfterUninstall = readFileSync(hermesPath, "utf8");
+      assert.ok(!hermesAfterUninstall.includes("agent-memory-hook"));
+      assert.match(hermesAfterUninstall, /^  output_spill:\n    max_chars: 16000$/m);
+      assert.match(hermesAfterUninstall, /^  pre_tool_call:\n    - command: \/usr\/local\/bin\/my-guard\.sh/m);
+      assert.match(hermesAfterUninstall, /^hooks_auto_accept: false$/m);
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("ships valid example hook templates for Grok, Antigravity CLI, Cursor, and Hermes", () => {
+    const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+
+    const grokTpl = JSON.parse(readFileSync(path.join(repoRoot, "examples/hooks/grok.agent-memory.json"), "utf8"));
+    assert.ok(grokTpl.hooks?.UserPromptSubmit?.length >= 1);
+    assert.ok(grokTpl.hooks?.Stop?.length >= 1);
+
+    const agyTpl = JSON.parse(readFileSync(path.join(repoRoot, "examples/hooks/antigravity-cli.hooks.json"), "utf8"));
+    assert.ok(agyTpl["agent-memory"]?.PreInvocation?.length >= 1);
+    assert.ok(agyTpl["agent-memory"]?.Stop?.length >= 1);
+
+    const cursorTpl = JSON.parse(readFileSync(path.join(repoRoot, "examples/hooks/cursor.hooks.json"), "utf8"));
+    assert.equal(cursorTpl.version, 1);
+    assert.ok(cursorTpl.hooks?.sessionStart?.length >= 1);
+    assert.ok(cursorTpl.hooks?.beforeSubmitPrompt?.length >= 1);
+    assert.ok(cursorTpl.hooks?.stop?.length >= 1);
+
+    const hermesTpl = readFileSync(path.join(repoRoot, "examples/hooks/hermes.config.hooks.yaml"), "utf8");
+    assert.match(hermesTpl, /pre_llm_call:/);
+    assert.match(hermesTpl, /post_llm_call:/);
+    assert.match(hermesTpl, /on_session_finalize:/);
   });
 });

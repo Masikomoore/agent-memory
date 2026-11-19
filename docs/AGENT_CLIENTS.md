@@ -43,8 +43,10 @@ Use a stable logical `agentId` per client, for example:
 | Claude Code | `claude-code` |
 | Codex CLI | `codex` |
 | Cursor | `cursor` |
+| Antigravity CLI | `antigravity-cli` |
 | Gemini CLI | `gemini-cli` |
 | Grok Build | `grok` |
+| Hermes Agent | `hermes` |
 | WorkBuddy | `workbuddy` |
 | VS Code agent | `vscode` |
 
@@ -178,10 +180,22 @@ Remote `autoRecall` uses OpenClaw's pre-prompt lifecycle to inject bounded, untr
 
 ## Session & Turn Hooks (`agent-memory-hook`)
 
-For hosts that support native lifecycle hooks — currently **Claude Code**, **Codex CLI**, and **WorkBuddy** — `agent-memory-hook` pairs cleanly with Streamable HTTP MCP in a **dual-track setup**:
+For hosts that support native lifecycle hooks — **Claude Code**, **Codex CLI**, **WorkBuddy**, **Grok Build**, **Antigravity CLI**, **Cursor**, and **Hermes Agent** — `agent-memory-hook` pairs cleanly with Streamable HTTP MCP in a **dual-track setup**:
 
-- **Hooks (automatic background lifecycle)**: `UserPromptSubmit` runs a fast, bounded `auto-recall` (fail-open, repeat-suppressed, short-prompt skipped) and injects `<relevant-memories>` via `hookSpecificOutput.additionalContext`; `Stop` / `PreCompact` / `SessionEnd` spawn a detached background worker that parses only the newly added turns from `transcript_path` (filtering out `tool_use` / `tool_result` / `<relevant-memories>` blocks to avoid feedback loops) and posts them to `/v1/capture` using the server's shared default scope.
+- **Hooks (automatic background lifecycle)**: pre-turn recall runs a fast, bounded `auto-recall` (fail-open, repeat-suppressed, short-prompt skipped) and injects `<relevant-memories>` using each host's native stdout contract; turn-end / pre-compact / session-end events spawn a detached background worker that parses only newly added turns (filtering out `tool_use` / `tool_result` / `<relevant-memories>` blocks to avoid feedback loops) and posts them to `/v1/capture` using the server's shared default scope.
 - **MCP (on-demand explicit control)**: keeps `memory_recall` / `memory_capture` / `memory_health` available when the agent needs deeper search or explicit storage.
+
+### Host hook matrix
+
+| Host (`--host` / `install`) | User config path | Project config path | Installed events | Stdout / protocol notes |
+| --- | --- | --- | --- | --- |
+| `claude-code` | `~/.claude/settings.json` | `.claude/settings.local.json` | `UserPromptSubmit`, async `Stop`, `PreCompact`, `SessionEnd` | `hookSpecificOutput.additionalContext` |
+| `codex` | `~/.codex/hooks.json` | `.codex/hooks.json` | `UserPromptSubmit`, `Stop` | Strict Codex schema (no `async` key); `hookSpecificOutput.additionalContext` |
+| `workbuddy` | `~/.workbuddy/settings.json` | `.workbuddy/settings.local.json` | `UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd` | `hookSpecificOutput.additionalContext` |
+| `grok` (`grok-build`) | `~/.grok/hooks/agent-memory.json` | `.grok/hooks/agent-memory.json` | `UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd` | Drop-in JSON (never touches `config.toml`); note Grok also scans `~/.claude/settings.json` unless `[compat.claude] hooks = false` |
+| `antigravity-cli` (`agy`) | `~/.gemini/config/hooks.json` | `.agents/hooks.json` | `SessionStart`, `PreInvocation`, `Stop` | Named `"agent-memory"` entry preserving sibling hooks; emits `injectSteps.systemMessage.systemMessage` (`invocationNum > 1` skipped) & `{"decision":""}` on `Stop`; parses `USER_INPUT`/`PLANNER_RESPONSE` transcripts |
+| `cursor` | `~/.cursor/hooks.json` | `.cursor/hooks.json` | `sessionStart`, `beforeSubmitPrompt`, `stop`, `preCompact`, `sessionEnd` | `version: 1` flat arrays; injects project context on `sessionStart` via `additional_context` and always emits `{"continue":true}` on `beforeSubmitPrompt` |
+| `hermes` (`hermes-agent`) | `~/.hermes/config.yaml` | `.hermes/config.yaml` | `pre_llm_call`, `post_llm_call`, `on_session_finalize` | Surgical comment-preserving YAML `hooks:` merge; emits `{"context":"..."}` on `pre_llm_call` and captures `extra.user_message` + `extra.assistant_response` on `post_llm_call`. Approve once via TTY prompt or `hermes --accept-hooks` (checked by `doctor`) |
 
 ### 1. Configure credentials once
 
@@ -198,7 +212,7 @@ chmod 600 ~/.config/agent-memory/hook.env
 
 Process environment variables always override `hook.env`. Tokens are never written into hook config files or background worker task files.
 
-### 2. Install hooks for Claude Code, Codex CLI, or WorkBuddy
+### 2. Install hooks for any supported host
 
 `install` previews the non-destructive merge by default (`--dry-run`) and writes atomically when `--apply` is passed:
 
@@ -207,20 +221,25 @@ Process environment variables always override `hook.env`. Tokens are never writt
 agent-memory-hook install claude-code
 agent-memory-hook install codex
 agent-memory-hook install workbuddy
+agent-memory-hook install grok
+agent-memory-hook install antigravity-cli   # alias: agy
+agent-memory-hook install cursor
+agent-memory-hook install hermes
 
-# Apply to user-level configs:
-# - Claude Code: ~/.claude/settings.json
-# - Codex CLI:   ~/.codex/hooks.json (strict Codex schema, no unsupported fields)
-# - WorkBuddy:   ~/.workbuddy/settings.json
+# Apply to user-level configs (non-destructive, idempotent)
 agent-memory-hook install claude-code --apply
 agent-memory-hook install codex --apply
 agent-memory-hook install workbuddy --apply
+agent-memory-hook install grok --apply
+agent-memory-hook install antigravity-cli --apply
+agent-memory-hook install cursor --apply
+agent-memory-hook install hermes --apply
 
 # Verify server reachability, env loading, state dir, and installed hooks
 agent-memory-hook doctor
 ```
 
-Use `--project` to write into the current workspace (`.claude/settings.local.json`, `.codex/hooks.json`, `.workbuddy/settings.local.json`), or `--uninstall --apply` to cleanly remove only Agent Memory entries while preserving all other host settings and hooks. Reference templates also live under [`examples/hooks`](../examples/hooks).
+Use `--project` to write into the current workspace (`.claude/settings.local.json`, `.codex/hooks.json`, `.workbuddy/settings.local.json`, `.grok/hooks/agent-memory.json`, `.agents/hooks.json`, `.cursor/hooks.json`, `.hermes/config.yaml`), or `--uninstall --apply` to cleanly remove only Agent Memory entries while preserving all other host settings and hooks. Reference templates live under [`examples/hooks`](../examples/hooks).
 
 ### 3. Generic plain-text REST bridge
 

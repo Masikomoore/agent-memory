@@ -57,33 +57,36 @@ OpenClaw ──────┘                            ├─ 衰减 / 强化
 
 ## 核心能力与近期引擎升级
 
-- **双轨自动记忆（MCP + Session/Turn Hooks）**：支持 **Claude Code**、**Codex CLI**、**WorkBuddy** 原生生命周期钩子，每轮前无感召回、每轮后后台异步增量捕获，与 MCP 主动工具互补且防回环。
+- **双轨自动记忆（MCP + Session/Turn Hooks）**：支持 **Claude Code**、**Codex CLI**、**WorkBuddy**、**Grok Build**、**Antigravity CLI**、**Cursor**、**Hermes Agent** 原生生命周期钩子，每轮前无感召回、每轮后后台异步增量捕获，与 MCP 主动工具互补且防回环。
 - **全摘要层 BM25 混合检索（`search_text`）**：LanceDB 向量检索叠加覆盖 `text + l0_abstract + l1_overview + l2_content` 的全摘要 BM25 索引，老库升级时自动完成 Schema 迁移与回填。
 - **生产级数据与隐私加固**：重复 ID 物理行写入保护（防止向量被覆盖）、LLM JSON 解析报错日志全面脱敏（不泄露对话原文）、提取链路瞬态上游故障单次退避重试、`memory-compactor` 按 Scope 严格隔离防跨区合并。
 - **私有自托管与模型可替换**：支持本地、NAS、局域网、Coolify / Docker；任意 OpenAI-compatible API 或本地 Ollama，不绑定厂商、不需要知识图谱。
 
 ## 双轨接入：MCP + Session/Turn Hooks
 
-只配 MCP 时，Agent 拥有了记忆工具，但仍依赖模型当轮自觉去调用。新增的 **`agent-memory-hook`** 为 **Claude Code**、**Codex CLI** 和 **WorkBuddy** 补齐了宿主机生命周期自动化，与 MCP 双轨共存：
+只配 MCP 时，Agent 拥有了记忆工具，但仍依赖模型当轮自觉去调用。新增的 **`agent-memory-hook`** 为 **Claude Code**、**Codex CLI**、**WorkBuddy**、**Grok Build**、**Antigravity CLI**、**Cursor** 和 **Hermes Agent** 补齐了宿主机生命周期自动化，与 MCP 双轨共存：
 
-- **每轮前自动召回（`UserPromptSubmit`）**：本地快速跳过寒暄/斜杠命令，8 轮内不重复刷屏同一记忆，严格 fail-open 超时兜底（绝不阻塞输入），通过标准 `hookSpecificOutput.additionalContext` 注入带 `[UNTRUSTED DATA]` 边界的相关记忆。
-- **每轮后后台异步增量捕获（`Stop` / `PreCompact` / `SessionEnd`）**：主进程约 `50ms` 内立即返回不卡顿；后台 detached worker 解析 Claude / WorkBuddy JSONL 与 Codex rollout JSONL（含 `lastPrompt + last_assistant_message` 兜底配对），按本地水位线仅提交新增轮次，自动剔除 `tool_use` / `tool_result` 与注入的 `<relevant-memories>` 杜绝回环，临时任务文件**零密钥落盘**。
+- **每轮前自动召回**：本地快速跳过寒暄/斜杠命令，8 轮内不重复刷屏同一记忆，严格 fail-open 超时兜底（绝不阻塞输入），并按各客户端原生协议注入带 `[UNTRUSTED DATA]` 边界的相关记忆（`hookSpecificOutput.additionalContext`、Antigravity `injectSteps`、Cursor `additional_context` / `continue: true`、Hermes `{"context": ...}`）。
+- **每轮后后台异步增量捕获**：主进程约 `50ms` 内立即返回不卡顿；后台 detached worker 解析 Claude / WorkBuddy / Grok / Cursor JSONL、Codex rollout JSONL 与 Antigravity `USER_INPUT`/`PLANNER_RESPONSE` 日志（含 `lastPrompt + last_assistant_message` 及 Hermes `extra.user_message + assistant_response` 兜底配对），按本地水位线仅提交新增轮次，自动剔除 `tool_use` / `tool_result` 与注入的 `<relevant-memories>` 杜绝回环，临时任务文件**零密钥落盘**。
 - **兼容桌面 GUI 客户端**：自动加载 `~/.config/agent-memory/hook.env`（`chmod 600`），即使桌面端未继承 `.zshrc` 也能正常鉴权。
-- **非破坏性安装与一键体检**：`agent-memory-hook install <claude-code|codex|workbuddy>` 幂等合并配置、保留原有设置与其他 Hooks；`agent-memory-hook doctor` 一键体检服务健康、配置加载、缓存目录与三款客户端安装状态。
+- **非破坏性安装与一键体检**：`agent-memory-hook install <claude-code|codex|workbuddy|grok|antigravity-cli|cursor|hermes>` 幂等合并配置、保留原有设置、注释与其他 Hooks；`agent-memory-hook doctor` 一键体检服务健康、配置加载、缓存目录与各客户端安装状态。
 
 ## 已经真实验证
 
-> **真实环境已验证 Claude Code → Codex 召回、Codex 写入 → Claude Code + Grok 跨端召回，以及本机 Claude Code / Codex 接入远端 CA 节点的 Session/Turn Hooks 实时召回与 `doctor` 验收。**
+> **真实环境已验证 Claude Code → Codex 召回、Codex 写入 → Claude Code + Grok 跨端召回，以及本机 Claude Code / Codex 接入远端节点的 Session/Turn Hooks 实时召回与 `doctor` 验收。**
 
 | 客户端 | MCP 接入 | Session/Turn Hooks (`agent-memory-hook`) | 状态 |
 |---|---|---|---|
 | Claude Code | Streamable HTTP `/mcp` | `~/.claude/settings.json`（`UserPromptSubmit` / 异步 `Stop` / `PreCompact` / `SessionEnd`） | ✅ 真机验证（MCP + Hooks） |
 | Codex CLI | Streamable HTTP `/mcp` | `~/.codex/hooks.json`（`UserPromptSubmit` / `Stop` + 后台异步 worker） | ✅ 真机验证（MCP + Hooks） |
-| WorkBuddy | Streamable HTTP `/mcp` | `~/.workbuddy/settings.json`（`UserPromptSubmit` / `Stop` / `PreCompact` / `SessionEnd` + `hook.env`） | ✅ 安装器、模板与 E2E 验证 |
-| Grok Build | Streamable HTTP `/mcp` | — | ✅ 真实环境验证 |
+| WorkBuddy | Streamable HTTP `/mcp` | `~/.workbuddy/settings.json`（`UserPromptSubmit` / `Stop` / `PreCompact` / `SessionEnd`） | ✅ 安装器、模板与 E2E 验证 |
+| Grok Build | Streamable HTTP `/mcp` | `~/.grok/hooks/agent-memory.json`（`UserPromptSubmit` / `Stop` / `PreCompact` / `SessionEnd`） | ✅ MCP 真机验证 + Hook 安装器与测试就绪 |
+| Antigravity CLI | Streamable HTTP `/mcp` | `~/.gemini/config/hooks.json`（`SessionStart` / `PreInvocation` / `Stop`） | ✅ Hook 安装器、模板与测试就绪 |
+| Cursor | Streamable HTTP `/mcp` | `~/.cursor/hooks.json`（`sessionStart` / `beforeSubmitPrompt` / `stop` / `preCompact` / `sessionEnd`） | ✅ MCP 模板 + Hook 安装器与测试就绪 |
+| Hermes Agent | Streamable HTTP `/mcp` | `~/.hermes/config.yaml`（`pre_llm_call` / `post_llm_call` / `on_session_finalize`） | ✅ Hook 安装器、YAML 合并与测试就绪 |
 | OpenClaw | REST 远程模式 | 原生生命周期插件（`memory.mode: "remote"`） | ✅ 自动化集成覆盖 |
 | Gemini CLI | Streamable HTTP `/mcp` | — | ✅ 带认证 MCP 传输验证 |
-| Cursor / VS Code | Streamable HTTP `/mcp` | — | 🧩 配置模板就绪 |
+| VS Code | Streamable HTTP `/mcp` | — | 🧩 配置模板就绪 |
 
 详细接入说明见 [docs/AGENT_CLIENTS.md](docs/AGENT_CLIENTS.md)。
 
@@ -94,12 +97,12 @@ OpenClaw ──────┘                            ├─ 衰减 / 强化
 如果你已经在用 Claude Code、Codex CLI、WorkBuddy、Grok Build、Gemini CLI 或 Cursor，直接把下面这句话发给它（完整版提示词见 [`examples/mcp-clients/agent-install-prompt.md`](examples/mcp-clients/agent-install-prompt.md)）：
 
 ```text
-帮我从 https://github.com/Masikomoore/agent-memory 安装或更新 Agent Memory：先检查本机已安装的客户端以及现有 MCP 与 Hook 配置（不要覆盖我原有的其他配置和 Hooks），接好 MCP，并帮我配置 ~/.config/agent-memory/hook.env（chmod 600）以及 Claude Code / Codex / WorkBuddy 的 agent-memory-hook，最后用 `agent-memory-hook doctor` 和真实的召回/写入测试验证通过。
+帮我从 https://github.com/Masikomoore/agent-memory 安装或更新 Agent Memory：先检查本机已安装的客户端以及现有 MCP 与 Hook 配置（不要覆盖我原有的其他配置和 Hooks），接好 MCP，并帮我配置 ~/.config/agent-memory/hook.env（chmod 600）以及本机已安装客户端（Claude Code / Codex / WorkBuddy / Grok / Antigravity CLI / Cursor / Hermes）的 agent-memory-hook，最后用 `agent-memory-hook doctor` 和真实的召回/写入测试验证通过。
 ```
 
 这段 Agent 安装提示词会明确约束 AI 完成三件关键动作，做到**首次安装与后续更新都无感**：
 
-1. **先检查再动手**：扫描本机已安装的 Claude Code（`~/.claude/settings.json`）、Codex（`~/.codex/hooks.json`）、WorkBuddy（`~/.workbuddy/settings.json`）与现有 Hooks，保留所有无关配置和已有 Hooks，优先使用稳定的 Node 绝对路径 + 编译后的 `dist/src/client/memory-hook-cli.js`。
+1. **先检查再动手**：扫描本机已安装的客户端（Claude Code、Codex、WorkBuddy、Grok、Antigravity CLI、Cursor、Hermes）与现有 Hooks，保留所有无关配置、注释和已有 Hooks，优先使用稳定的 Node 绝对路径 + 编译后的 `dist/src/client/memory-hook-cli.js`。
 2. **安全安装与幂等更新**：配置 `/mcp` 行为规则与 `~/.config/agent-memory/hook.env`（权限 `600`，绝不在聊天或仓库暴露 Token）；对 Hook 先跑 `agent-memory-hook install <host>`（默认 `--dry-run` 预览），确认无重复、符合 Codex 严格 Schema 后再 `--apply` 写入，老用户更新时重复执行也幂等无副作用。
 3. **闭环验证才算完成**：自动执行 `agent-memory-hook doctor` 检查服务端连通性、环境变量与各客户端 Hook 状态，并做一次只读 `UserPromptSubmit` 召回测试与跨端 MCP 写入/召回验证，有问题直接原地修复。
 
@@ -125,7 +128,7 @@ curl http://127.0.0.1:7337/health
 
 MCP 地址为 `http://127.0.0.1:7337/mcp`（使用 `Authorization: Bearer <MEMORY_SERVER_TOKEN>`）。局域网/广域网与 Coolify 部署见 [docs/MEMORY_SERVER.md](docs/MEMORY_SERVER.md) 和 [docs/DEPLOY_COOLIFY.md](docs/DEPLOY_COOLIFY.md)。
 
-#### 第 2 步：手工启用 Claude Code / Codex / WorkBuddy 的 Session/Turn Hooks
+#### 第 2 步：手工启用客户端 Session/Turn Hooks
 
 ```bash
 # 1. 构建编译后的 Hook CLI（Node 直接执行，启动约 30~50ms）
@@ -139,10 +142,14 @@ MEMORY_SERVER_TOKEN=替换为你的MEMORY_SERVER_TOKEN
 EOF
 chmod 600 ~/.config/agent-memory/hook.env
 
-# 3. 安装到对应客户端（不带 --apply 时仅 dry-run 预览；不会覆盖已有其他 Hooks）
+# 3. 按需安装到对应客户端（不带 --apply 时仅 dry-run 预览；不会覆盖已有其他 Hooks）
 node dist/src/client/memory-hook-cli.js install claude-code --apply
 node dist/src/client/memory-hook-cli.js install codex --apply
 node dist/src/client/memory-hook-cli.js install workbuddy --apply
+node dist/src/client/memory-hook-cli.js install grok --apply
+node dist/src/client/memory-hook-cli.js install antigravity-cli --apply   # 别名: agy
+node dist/src/client/memory-hook-cli.js install cursor --apply
+node dist/src/client/memory-hook-cli.js install hermes --apply
 
 # 4. 一键体检：验证服务健康、env 加载、缓存目录与已安装 Hooks
 node dist/src/client/memory-hook-cli.js doctor

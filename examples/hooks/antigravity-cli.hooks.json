@@ -1,0 +1,25 @@
+{
+  "agent-memory": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "agent-memory-hook handle --host antigravity-cli",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "agent-memory-hook handle --host antigravity-cli",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "agent-memory-hook handle --host antigravity-cli",
+        "timeout": 5
+      }
+    ]
+  }
+}

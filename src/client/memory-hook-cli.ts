@@ -16,10 +16,12 @@ import {
 import {
   defaultAgentIdForHost,
   detectHookHost,
-  formatAdditionalContextOutput,
+  formatHookOutput,
+  normalizeHookEventName,
   normalizeHookHost,
   parseHookPayload,
   SUPPORTED_HOOK_HOSTS,
+  type HookEventName,
   type HookHost,
   type SupportedHookHost,
 } from "./hook-protocol.js";
@@ -58,6 +60,7 @@ export interface HookCaptureWorkerTask {
   scope?: string;
   sessionKey: string;
   transcriptPath?: string;
+  userMessage?: string;
   lastAssistantMessage?: string;
   includeAssistant: boolean;
   maxCaptureChars: number;
@@ -270,6 +273,7 @@ export async function executeCaptureWorkerTask(
     const delta = extractCaptureDelta({
       transcriptPath: task.transcriptPath,
       state,
+      userMessage: task.userMessage,
       lastAssistantMessage: task.lastAssistantMessage,
       includeAssistant: task.includeAssistant,
       maxCaptureChars: task.maxCaptureChars,
@@ -332,17 +336,65 @@ function enqueueDetachedCaptureWorker(
   }
 }
 
+function emitHookResponse(
+  stdout: Output,
+  host: HookHost,
+  eventName: HookEventName | undefined,
+  additionalContext?: string,
+): void {
+  const formatted = formatHookOutput(host, eventName, additionalContext);
+  if (formatted) {
+    stdout.write(`${formatted}\n`);
+  }
+}
+
+function buildCursorSessionStartQuery(cwd: string | undefined, homeDir: string): string | undefined {
+  if (!cwd?.trim()) return undefined;
+  const resolvedCwd = path.resolve(cwd.trim());
+  const resolvedHome = path.resolve(homeDir);
+  if (resolvedCwd === resolvedHome || resolvedCwd === path.parse(resolvedCwd).root) {
+    return undefined;
+  }
+  const base = path.basename(resolvedCwd).trim();
+  if (!base || base === "." || base === "..") return undefined;
+  return `project ${base} architecture conventions preferences`;
+}
+
 async function handleLifecycleHook(
   parsed: ParsedArgs,
   processEnv: NodeJS.ProcessEnv,
   io: { stdin: NodeJS.ReadableStream; stdout: Output; stderr: Output },
   dependencies: MemoryHookDependencies,
 ): Promise<number> {
+  let resolvedHost: HookHost = (() => {
+    const normalized = normalizeHookHost(stringOption(parsed.options, "host"));
+    return normalized && normalized !== "auto" ? normalized : "generic";
+  })();
+  let resolvedEvent: HookEventName | undefined = normalizeHookEventName(stringOption(parsed.options, "event"));
+  let responded = false;
+
+  const respond = (host: HookHost, eventName: HookEventName | undefined, additionalContext?: string) => {
+    if (responded) return;
+    responded = true;
+    emitHookResponse(io.stdout, host, eventName, additionalContext);
+  };
+
   try {
-    return await handleLifecycleHookInner(parsed, processEnv, io, dependencies);
+    return await handleLifecycleHookInner(
+      parsed,
+      processEnv,
+      io,
+      dependencies,
+      (host, eventName) => {
+        resolvedHost = host;
+        resolvedEvent = eventName;
+      },
+      respond,
+    );
   } catch {
     // Lifecycle hooks always fail-open so configuration or transport faults
-    // never block or stall Claude Code, Codex CLI, or WorkBuddy.
+    // never block or stall any host agent.
+    respond(resolvedHost, resolvedEvent);
     return 0;
   }
 }
@@ -352,32 +404,42 @@ async function handleLifecycleHookInner(
   processEnv: NodeJS.ProcessEnv,
   io: { stdin: NodeJS.ReadableStream; stdout: Output; stderr: Output },
   dependencies: MemoryHookDependencies,
+  onResolved: (host: HookHost, eventName: HookEventName | undefined) => void,
+  respond: (host: HookHost, eventName: HookEventName | undefined, additionalContext?: string) => void,
 ): Promise<number> {
   const now = dependencies.now ?? (() => Date.now());
   const homeDir = dependencies.homeDir ?? homedir();
   const explicitEnvFile = stringOption(parsed.options, "env-file");
-  let env: NodeJS.ProcessEnv = processEnv;
-  try {
-    env = loadHookEnv(processEnv, { envFile: explicitEnvFile, homeDir }).env;
-  } catch {
-    // Lifecycle hooks always fail-open so misconfigured env files never block the host agent.
-    return 0;
-  }
+  const explicitHost = stringOption(parsed.options, "host");
+  const eventOverride = stringOption(parsed.options, "event");
 
   let rawStdin = "";
   try {
     rawStdin = await readStdin(io.stdin);
   } catch {
+    const fallbackHost = normalizeHookHost(explicitHost);
+    respond(fallbackHost && fallbackHost !== "auto" ? fallbackHost : "generic", normalizeHookEventName(eventOverride));
     return 0;
   }
 
-  const eventOverride = stringOption(parsed.options, "event");
   const payload = parseHookPayload(rawStdin, eventOverride);
-  if (!payload.eventName) {
+  let env: NodeJS.ProcessEnv = processEnv;
+  try {
+    env = loadHookEnv(processEnv, { envFile: explicitEnvFile, homeDir }).env;
+  } catch {
+    const fallbackHost = detectHookHost(explicitHost, payload, processEnv);
+    onResolved(fallbackHost, payload.eventName);
+    respond(fallbackHost, payload.eventName);
     return 0;
   }
 
-  const host = detectHookHost(stringOption(parsed.options, "host"), payload, env);
+  const host = detectHookHost(explicitHost, payload, env);
+  onResolved(host, payload.eventName);
+  if (!payload.eventName) {
+    respond(host, undefined);
+    return 0;
+  }
+
   const agentId =
     stringOption(parsed.options, "agent-id") ??
     env.MEMORY_AGENT_ID?.trim() ??
@@ -388,17 +450,95 @@ async function handleLifecycleHookInner(
 
   if (payload.eventName === "SessionStart") {
     pruneExpiredSessionStates(stateDir, undefined, now());
+
+    // Cursor's sessionStart natively supports injecting `additional_context`
+    // while beforeSubmitPrompt currently only reads continue/user_message.
+    if (host === "cursor") {
+      const projectQuery = buildCursorSessionStartQuery(payload.cwd, homeDir);
+      if (projectQuery) {
+        const recallTimeoutMs =
+          parsePositiveInt(stringOption(parsed.options, "recall-timeout-ms"), "--recall-timeout-ms") ??
+          parsePositiveInt(env.MEMORY_HOOK_RECALL_TIMEOUT_MS, "MEMORY_HOOK_RECALL_TIMEOUT_MS") ??
+          DEFAULT_RECALL_TIMEOUT_MS;
+        const maxItems =
+          parsePositiveInt(stringOption(parsed.options, "limit"), "--limit") ??
+          parsePositiveInt(env.MEMORY_HOOK_RECALL_MAX_ITEMS, "MEMORY_HOOK_RECALL_MAX_ITEMS") ??
+          DEFAULT_AUTO_RECALL_MAX_ITEMS;
+        const maxChars =
+          parsePositiveInt(env.MEMORY_HOOK_RECALL_MAX_CHARS, "MEMORY_HOOK_RECALL_MAX_CHARS") ??
+          DEFAULT_AUTO_RECALL_MAX_CHARS;
+        const perItemMaxChars =
+          parsePositiveInt(env.MEMORY_HOOK_RECALL_PER_ITEM_CHARS, "MEMORY_HOOK_RECALL_PER_ITEM_CHARS") ??
+          DEFAULT_AUTO_RECALL_PER_ITEM_CHARS;
+        const minRepeated =
+          parseNonNegativeInt(env.MEMORY_HOOK_RECALL_MIN_REPEATED, "MEMORY_HOOK_RECALL_MIN_REPEATED") ??
+          DEFAULT_AUTO_RECALL_MIN_REPEATED;
+
+        const createClient = dependencies.createClient ?? createMemoryHttpClient;
+        try {
+          const client = createClient({
+            baseUrl: env.MEMORY_SERVER_URL?.trim() || "http://127.0.0.1:7337",
+            token: env.MEMORY_SERVER_TOKEN,
+            timeoutMs: recallTimeoutMs,
+          });
+          const response = await client.recall({
+            query: projectQuery,
+            limit: Math.min(20, Math.max(maxItems, maxItems * 2)),
+            agentId,
+            scope,
+            source: "auto-recall",
+          });
+          const rendered = renderBoundedMemoriesWithIds(response.memories, maxItems, maxChars, perItemMaxChars);
+          if (rendered) {
+            if (minRepeated > 0) {
+              const state = loadSessionState(stateDir, agentId, sessionKey, now());
+              for (const id of rendered.ids) {
+                state.recalledAtTurn[id] = state.turnCount;
+              }
+              try {
+                saveSessionState(stateDir, state, now());
+              } catch {
+                // ignore state write error
+              }
+            }
+            respond(host, "SessionStart", rendered.text);
+            return 0;
+          }
+        } catch {
+          // Fail-open on recall timeout or server failure.
+        }
+      }
+    }
+
+    respond(host, "SessionStart");
     return 0;
   }
 
   if (payload.eventName === "UserPromptSubmit") {
     const rawPrompt = payload.prompt ?? "";
     const cleanPrompt = sanitizeHookTurnText("user", rawPrompt);
-    if (!cleanPrompt) return 0;
+    if (!cleanPrompt) {
+      respond(host, "UserPromptSubmit");
+      return 0;
+    }
 
     // Cache the current turn's cleaned prompt so Stop has a fallback pair even
     // if the host has not flushed transcript_path yet.
     const state = loadSessionState(stateDir, agentId, sessionKey, now());
+
+    // Antigravity CLI's PreInvocation fires before every model call inside a
+    // multi-step tool loop (`invocationNum: 1, 2, ...`). Skip repeat recalls
+    // for follow-up invocations of the same user turn.
+    if (
+      host === "antigravity-cli" &&
+      payload.invocationNum !== undefined &&
+      payload.invocationNum > 1 &&
+      state.lastPrompt?.text === cleanPrompt
+    ) {
+      respond(host, "UserPromptSubmit");
+      return 0;
+    }
+
     state.turnCount += 1;
     state.lastPrompt = { text: cleanPrompt, at: now() };
     try {
@@ -409,6 +549,7 @@ async function handleLifecycleHookInner(
 
     const minLength = parsePositiveInt(env.MEMORY_HOOK_RECALL_MIN_LENGTH, "MEMORY_HOOK_RECALL_MIN_LENGTH");
     if (shouldSkipRetrieval(cleanPrompt, minLength)) {
+      respond(host, "UserPromptSubmit");
       return 0;
     }
 
@@ -453,7 +594,10 @@ async function handleLifecycleHookInner(
       }
 
       const rendered = renderBoundedMemoriesWithIds(candidates, maxItems, maxChars, perItemMaxChars);
-      if (!rendered) return 0;
+      if (!rendered) {
+        respond(host, "UserPromptSubmit");
+        return 0;
+      }
 
       if (minRepeated > 0) {
         for (const id of rendered.ids) {
@@ -466,9 +610,10 @@ async function handleLifecycleHookInner(
         }
       }
 
-      io.stdout.write(`${formatAdditionalContextOutput("UserPromptSubmit", rendered.text)}\n`);
+      respond(host, "UserPromptSubmit", rendered.text);
     } catch {
       // Fail-open: never break the user's prompt when the central memory server is unreachable.
+      respond(host, "UserPromptSubmit");
     }
     return 0;
   }
@@ -476,6 +621,7 @@ async function handleLifecycleHookInner(
   // Stop / PreCompact / SessionEnd -> incremental capture
   if (payload.eventName === "Stop" && payload.stopHookActive) {
     // Another stop hook already forced continuation; avoid redundant capture churn.
+    respond(host, "Stop");
     return 0;
   }
 
@@ -497,6 +643,7 @@ async function handleLifecycleHookInner(
     scope,
     sessionKey,
     transcriptPath: payload.transcriptPath,
+    userMessage: payload.userMessage,
     lastAssistantMessage: payload.lastAssistantMessage,
     includeAssistant,
     maxCaptureChars,
@@ -513,6 +660,7 @@ async function handleLifecycleHookInner(
     } catch {
       // Fail-open on capture errors.
     }
+    respond(host, payload.eventName);
     return 0;
   }
 
@@ -521,6 +669,7 @@ async function handleLifecycleHookInner(
   } catch {
     // Fail-open if worker spawn fails.
   }
+  respond(host, payload.eventName);
   return 0;
 }
 
@@ -701,18 +850,22 @@ async function handleDoctorCommand(
     for (const err of host.parseErrors) {
       io.stdout.write(`    parse error: ${err}\n`);
     }
+    for (const note of host.notes) {
+      io.stdout.write(`    note: ${note}\n`);
+    }
   }
   return serverHealth.ok ? 0 : 1;
 }
 
 function helpText(): string {
+  const hostList = SUPPORTED_HOOK_HOSTS.join("|");
   return [
-    "agent-memory-hook — lifecycle hook bridge for Claude Code, Codex CLI, WorkBuddy, and generic REST hooks",
+    "agent-memory-hook — lifecycle hook bridge for Claude Code, Codex CLI, WorkBuddy, Grok, Antigravity CLI, Cursor, Hermes, and generic REST hooks",
     "",
     "Usage:",
-    "  agent-memory-hook handle [--host auto|claude-code|codex|workbuddy] [--event auto|UserPromptSubmit|Stop|PreCompact|SessionEnd] [--agent-id ID] [--scope SCOPE] [--env-file PATH] [--sync]",
-    "  agent-memory-hook install <claude-code|codex|workbuddy> [--user|--project] [--shared] [--env-file PATH] [--command CMD] [--apply|--dry-run] [--uninstall] [--json]",
-    "  agent-memory-hook doctor [claude-code|codex|workbuddy] [--env-file PATH] [--json]",
+    `  agent-memory-hook handle [--host auto|${hostList}] [--event auto|UserPromptSubmit|Stop|PreCompact|SessionEnd|SessionStart] [--agent-id ID] [--scope SCOPE] [--env-file PATH] [--sync]`,
+    `  agent-memory-hook install <${hostList}> [--user|--project] [--shared] [--env-file PATH] [--command CMD] [--apply|--dry-run] [--uninstall] [--json]`,
+    `  agent-memory-hook doctor [${hostList}] [--env-file PATH] [--json]`,
     "  agent-memory-hook health",
     "  agent-memory-hook recall [--query TEXT] [--limit N] [--agent-id ID] [--scope SCOPE] [--json]",
     "  agent-memory-hook capture [--text TEXT] [--session-key KEY] [--agent-id ID] [--scope SCOPE]",

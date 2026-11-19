@@ -86,11 +86,13 @@ Current integration status:
 |---|---|---|---|
 | Claude Code | Streamable HTTP `/mcp` | `~/.claude/settings.json` (`UserPromptSubmit`, async `Stop`, `PreCompact`, `SessionEnd`) | ✅ real-environment verified (MCP + Hooks) |
 | Codex CLI | Streamable HTTP `/mcp` | `~/.codex/hooks.json` (`UserPromptSubmit`, `Stop` + detached async worker) | ✅ real-environment verified (MCP + Hooks) |
-| WorkBuddy | Streamable HTTP `/mcp` | `~/.workbuddy/settings.json` (`UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd` + `hook.env`) | ✅ hook installer, templates & E2E verified |
-| Grok Build | Streamable HTTP `/mcp` | — | ✅ real-environment verified |
+| WorkBuddy | Streamable HTTP `/mcp` | `~/.workbuddy/settings.json` (`UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd`) | ✅ hook installer, templates & E2E verified |
+| Grok Build | Streamable HTTP `/mcp` | `~/.grok/hooks/agent-memory.json` (`UserPromptSubmit`, `Stop`, `PreCompact`, `SessionEnd`) | ✅ MCP verified + hook installer & tests ready |
+| Antigravity CLI | Streamable HTTP `/mcp` | `~/.gemini/config/hooks.json` (`SessionStart`, `PreInvocation`, `Stop`) | ✅ hook installer, templates & tests ready |
+| Cursor | Streamable HTTP `/mcp` | `~/.cursor/hooks.json` (`sessionStart`, `beforeSubmitPrompt`, `stop`, `preCompact`, `sessionEnd`) | ✅ MCP template + hook installer & tests ready |
+| Hermes Agent | Streamable HTTP `/mcp` | `~/.hermes/config.yaml` (`pre_llm_call`, `post_llm_call`, `on_session_finalize`) | ✅ hook installer, YAML merge & tests ready |
 | OpenClaw | REST remote-memory mode | Native lifecycle plugin (`memory.mode: "remote"`) | ✅ automated integration coverage |
 | Gemini CLI | Streamable HTTP `/mcp` | — | ✅ authenticated MCP transport verified |
-| Cursor | Streamable HTTP `/mcp` | — | 🧩 config template ready |
 | VS Code agents | Streamable HTTP `/mcp` | — | 🧩 config template ready |
 | Any MCP / Hook client | `/mcp` | `agent-memory-hook recall/capture/health` | 🧩 protocol-compatible |
 
@@ -98,12 +100,12 @@ See [docs/AGENT_CLIENTS.md](docs/AGENT_CLIENTS.md) for full MCP and Session/Turn
 
 ## Dual-track integration: MCP + Session/Turn Hooks
 
-MCP alone gives an agent tools, but still relies on the model remembering to call them. **`agent-memory-hook`** closes that gap for **Claude Code**, **Codex CLI**, and **WorkBuddy** without replacing MCP:
+MCP alone gives an agent tools, but still relies on the model remembering to call them. **`agent-memory-hook`** closes that gap for **Claude Code**, **Codex CLI**, **WorkBuddy**, **Grok Build**, **Antigravity CLI**, **Cursor**, and **Hermes Agent** without replacing MCP:
 
-- **Automatic pre-turn recall (`UserPromptSubmit`)**: skips trivial greetings/slash commands locally, suppresses recently injected memories for 8 turns, enforces a strict fail-open timeout, and injects bounded `<relevant-memories>` via `hookSpecificOutput.additionalContext`.
-- **Non-blocking incremental capture (`Stop` / `PreCompact` / `SessionEnd`)**: spawns a detached background worker (parent hook returns in ~50ms), parses only newly added turns from Claude/WorkBuddy JSONL or Codex rollout JSONL (with cached-prompt + `last_assistant_message` fallback), strips `<relevant-memories>` and `tool_use`/`tool_result` blocks so MCP and Hooks never loop, and never persists secrets to temp task files.
+- **Automatic pre-turn recall**: skips trivial greetings/slash commands locally, suppresses recently injected memories for 8 turns, enforces a strict fail-open timeout, and injects bounded `<relevant-memories>` using each host's native hook reply format (`hookSpecificOutput.additionalContext`, Antigravity `injectSteps`, Cursor `additional_context` / `continue: true`, Hermes `{"context": ...}`).
+- **Non-blocking incremental capture**: spawns a detached background worker (parent hook returns in ~50ms), parses only newly added turns from Claude/WorkBuddy/Grok/Cursor JSONL, Codex rollout JSONL, or Antigravity `USER_INPUT`/`PLANNER_RESPONSE` transcripts (plus cached-prompt / Hermes `extra.user_message + assistant_response` fallback), strips `<relevant-memories>` and `tool_use`/`tool_result` blocks so MCP and Hooks never loop, and never persists secrets to temp task files.
 - **Desktop GUI friendly**: loads `~/.config/agent-memory/hook.env` (`chmod 600`) when process env vars are absent, so GUI clients work without inheriting `.zshrc` exports.
-- **Non-destructive install & diagnostics**: `agent-memory-hook install <claude-code|codex|workbuddy>` merges idempotently while keeping your existing settings and hooks untouched; `agent-memory-hook doctor` verifies server health, env loading, cache dir, and installed hooks in one command.
+- **Non-destructive install & diagnostics**: `agent-memory-hook install <claude-code|codex|workbuddy|grok|antigravity-cli|cursor|hermes>` merges idempotently while keeping existing settings, comments, and sibling hooks untouched; `agent-memory-hook doctor` verifies server health, env loading, cache dir, and installed hooks in one command.
 
 ## Architecture
 
@@ -138,12 +140,12 @@ The important boundary is the server: clients never open their own competing dat
 Already using Claude Code, Codex CLI, WorkBuddy, Grok Build, Gemini CLI, or Cursor? Paste this one-line request into your agent (or copy the full checklist from [`examples/mcp-clients/agent-install-prompt.md`](examples/mcp-clients/agent-install-prompt.md)):
 
 ```text
-Install or update Agent Memory from https://github.com/Masikomoore/agent-memory: inspect my installed clients and existing configs/hooks without overwriting them, connect MCP, set up ~/.config/agent-memory/hook.env (chmod 600) and agent-memory-hook for Claude Code / Codex / WorkBuddy, and verify everything with `agent-memory-hook doctor` plus a real recall/capture check.
+Install or update Agent Memory from https://github.com/Masikomoore/agent-memory: inspect my installed clients and existing configs/hooks without overwriting them, connect MCP, set up ~/.config/agent-memory/hook.env (chmod 600) and agent-memory-hook for any supported client I have installed (Claude Code, Codex, WorkBuddy, Grok, Antigravity CLI, Cursor, Hermes), and verify everything with `agent-memory-hook doctor` plus a real recall/capture check.
 ```
 
 What the agent automatically checks, installs, and verifies for you:
 
-1. **Client & Hook inspection**: detects installed clients (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.workbuddy/settings.json`), preserves unrelated settings and existing hooks, and picks a stable Node path + compiled `dist/src/client/memory-hook-cli.js`.
+1. **Client & Hook inspection**: detects installed clients (`~/.claude/settings.json`, `~/.codex/hooks.json`, `~/.workbuddy/settings.json`, `~/.grok/hooks/agent-memory.json`, `~/.gemini/config/hooks.json`, `~/.cursor/hooks.json`, `~/.hermes/config.yaml`), preserves unrelated settings and existing hooks, and picks a stable Node path + compiled `dist/src/client/memory-hook-cli.js`.
 2. **Non-destructive MCP + Hook setup & updates**: connects `/mcp`, configures `~/.config/agent-memory/hook.env` (`chmod 600`, zero secrets printed), previews via `agent-memory-hook install <host>` (dry-run), and applies idempotently with `--apply` (safe to re-run on updates).
 3. **End-to-end verification**: runs `agent-memory-hook doctor`, validates live `UserPromptSubmit` hook recall, and verifies authenticated MCP capture-then-recall before reporting done.
 
@@ -185,7 +187,7 @@ npm run memory-server
 
 Connect MCP clients to `http://127.0.0.1:7337/mcp` with `Authorization: Bearer <MEMORY_SERVER_TOKEN>`. For LAN/WAN binding, Host/Origin allowlists, and Coolify deployment, see [docs/MEMORY_SERVER.md](docs/MEMORY_SERVER.md) and [docs/DEPLOY_COOLIFY.md](docs/DEPLOY_COOLIFY.md).
 
-#### Step B — Enable Session/Turn Hooks for Claude Code, Codex CLI, and WorkBuddy
+#### Step B — Enable Session/Turn Hooks for supported clients
 
 ```bash
 # 1. Build the compiled hook CLI (fast startup, no runtime transpiler needed)
@@ -203,6 +205,10 @@ chmod 600 ~/.config/agent-memory/hook.env
 node dist/src/client/memory-hook-cli.js install claude-code --apply
 node dist/src/client/memory-hook-cli.js install codex --apply
 node dist/src/client/memory-hook-cli.js install workbuddy --apply
+node dist/src/client/memory-hook-cli.js install grok --apply
+node dist/src/client/memory-hook-cli.js install antigravity-cli --apply   # alias: agy
+node dist/src/client/memory-hook-cli.js install cursor --apply
+node dist/src/client/memory-hook-cli.js install hermes --apply
 
 # 4. Verify server health, env loading, state dir, and installed hooks
 node dist/src/client/memory-hook-cli.js doctor

@@ -1,0 +1,10 @@
+hooks:
+  pre_llm_call:
+    - command: "agent-memory-hook handle --host hermes"
+      timeout: 5
+  post_llm_call:
+    - command: "agent-memory-hook handle --host hermes"
+      timeout: 5
+  on_session_finalize:
+    - command: "agent-memory-hook handle --host hermes"
+      timeout: 10

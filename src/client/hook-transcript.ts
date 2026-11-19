@@ -172,7 +172,20 @@ export function parseTranscriptJsonl(
       continue;
     }
 
-    // 3. Claude Code / WorkBuddy JSONL format (`type: "user" | "assistant"` with `message.content`).
+    // 3. Antigravity CLI transcript JSONL format (`type: "USER_INPUT" | "PLANNER_RESPONSE"`).
+    if (entryType === "USER_INPUT") {
+      if (entry.source === "SYSTEM") continue;
+      const text = extractTextFromContent(entry.content ?? entry.text);
+      if (text) pushTurn(claudeOrGenericTurns, "user", text);
+      continue;
+    }
+    if (entryType === "PLANNER_RESPONSE") {
+      const text = extractTextFromContent(entry.content ?? entry.text);
+      if (text) pushTurn(claudeOrGenericTurns, "assistant", text);
+      continue;
+    }
+
+    // 4. Claude Code / WorkBuddy / Grok / Cursor JSONL format (`type: "user" | "assistant"` with `message.content`).
     if (entryType === "user" || entryType === "assistant") {
       const message = asRecord(entry.message);
       const text = extractTextFromContent(message?.content ?? entry.content ?? entry.text);
@@ -180,7 +193,7 @@ export function parseTranscriptJsonl(
       continue;
     }
 
-    // 4. Generic chat JSONL fallback (`{ role: "user" | "assistant", content }`).
+    // 5. Generic chat JSONL fallback (`{ role: "user" | "assistant", content }`).
     const role = entry.role;
     if (role === "user" || role === "assistant") {
       const text = extractTextFromContent(entry.content ?? entry.text);
@@ -205,6 +218,7 @@ export function parseTranscriptJsonl(
 export interface ExtractCaptureDeltaParams {
   transcriptPath?: string;
   state: HookSessionState;
+  userMessage?: string;
   lastAssistantMessage?: string;
   includeAssistant?: boolean;
   maxCaptureChars?: number;
@@ -289,8 +303,9 @@ export function extractCaptureDelta(params: ExtractCaptureDeltaParams): Extracte
   }
 
   let consumedLastPrompt = false;
-  if (candidateTurns.length === 0 && params.state.lastPrompt?.text) {
-    const cleanUser = sanitizeHookTurnText("user", params.state.lastPrompt.text, maxAssistantTurnChars);
+  const fallbackUserText = params.userMessage?.trim() || params.state.lastPrompt?.text;
+  if (candidateTurns.length === 0 && fallbackUserText) {
+    const cleanUser = sanitizeHookTurnText("user", fallbackUserText, maxAssistantTurnChars);
     if (cleanUser) {
       candidateTurns.push({ role: "user", text: cleanUser });
       if (includeAssistant && params.lastAssistantMessage) {
@@ -304,7 +319,7 @@ export function extractCaptureDelta(params: ExtractCaptureDeltaParams): Extracte
         }
       }
       source = "fallback-pair";
-      consumedLastPrompt = true;
+      consumedLastPrompt = Boolean(params.state.lastPrompt?.text);
     }
   } else if (source === "transcript") {
     consumedLastPrompt = true;
