@@ -4,6 +4,17 @@ All notable public Agent Memory changes will be recorded here.
 
 ## Unreleased
 
+### Async Capture Queue & Magpie Capture Timeout Hardening
+
+- **Server-side asynchronous capture queue (`POST /v1/capture` + MCP `memory_capture`)**:
+  - Added `CaptureJobQueue` (`src/server/capture-queue.ts`) with synchronous input/scope validation, SHA-256 content & `idempotencyKey` deduplication (`MEMORY_CAPTURE_DEDUP_WINDOW_MS`, default `300000` ms), bounded queue backpressure (`HTTP 429` + `Retry-After`, `MEMORY_CAPTURE_MAX_QUEUE=128`), configurable execution concurrency (`MEMORY_CAPTURE_CONCURRENCY=1` default to serialize SmartExtractor LLM/embedding work), disk spool crash recovery (`MEMORY_CAPTURE_SPOOL=true`), and graceful shutdown drain (`MEMORY_CAPTURE_SHUTDOWN_TIMEOUT_MS=30000`).
+  - `POST /v1/capture` and MCP `memory_capture` now queue asynchronously by default, returning `202 Accepted` + `Location: /v1/capture/:jobId` (and `GET /v1/capture/:jobId` polling) so slow LLM extraction + 2560-dim embedding + dedup-merge cycles never hit client ~55s–60s tool timeouts or trigger duplicate retry merges; `"wait": true` / `?wait=true` / `MEMORY_CAPTURE_ASYNC=false` remain supported for synchronous `200 OK` callers.
+  - Updated `MemoryHttpClient` (`captureStatus`), `agent-memory-hook` worker (`mode: "async"` + `idempotencyKey`, plus `--wait` flag), Docker Compose, `.env.example`, and `docs/MEMORY_SERVER.md`.
+- **Magpie plugin capture hardening (`magpie-agent-memory` v0.3.0)**:
+  - Raised `recallTimeoutMs` upper bound to `25000` ms and decoupled `capture` MCP tool HTTP requests onto an independent `captureTimeoutMs` (`150000` ms / 150s default) so Magpie's 55s host tool timeout cannot abort an in-flight server write.
+  - Added `captureSoftWaitMs` (`45000` ms default) clean background handoff (`pending_server_processing`, `doNotRetry: true`) when connected to slower synchronous servers, plus SHA-256 client-side deduplication (`captureDedupWindowMs`, default `180000` ms) and `onResponse` abort-deduplication to suppress redundant immediate retries.
+- Verified with `npm run build`, `node --test test/memory-server-http.test.mjs test/mcp-shared-memory-clients.test.mjs test/openclaw-remote-mode.test.mjs test/memory-hook-cli.test.mjs test/agent-hooks-lifecycle.test.mjs test/magpie-gateway-plugin.test.mjs test/memory-core-assembly.test.mjs`, `npm run verify-package-runtime`, `node scripts/verify-ci-test-manifest.mjs`, `git diff --check`, and standalone `magpie-agent-memory` `npm test` + `npm pack --dry-run`.
+
 ### Magpie Gateway Hook + MCP Tools Plugin (`magpie-agent-memory`)
 
 - Added a standalone, publishable, zero-dependency [Magpie](https://github.com/yetone/magpie) plugin `magpie-agent-memory` (v0.2.0) under [`integrations/magpie`](integrations/magpie/README.md) combining asynchronous gateway hooks (`magpie.hooks`) with built-in Plugin MCP Tools (`main: "./index.mjs"` exposing `magpie-agent-memory_recall`, `magpie-agent-memory_capture`, and `magpie-agent-memory_health` via `/mcp/magpie/tools`), complete with embedded SVG `magpie.icon`, pre-populated GUI `magpie.options` template, standalone `LICENSE`, marketplace-grade `README.md`, `registry-entry.json` (`"name": "agent-memory"`), and `PUBLISHING.md`.

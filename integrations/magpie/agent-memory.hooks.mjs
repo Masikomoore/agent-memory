@@ -5,6 +5,15 @@ import path from "node:path";
 
 const DEFAULT_SERVER_URL = "http://127.0.0.1:7337";
 const DEFAULT_RECALL_TIMEOUT_MS = 2_500;
+const MAX_RECALL_TIMEOUT_MS = 25_000;
+const DEFAULT_CAPTURE_TIMEOUT_MS = 150_000;
+const MIN_CAPTURE_TIMEOUT_MS = 5_000;
+const MAX_CAPTURE_TIMEOUT_MS = 300_000;
+const DEFAULT_CAPTURE_SOFT_WAIT_MS = 45_000;
+const MIN_CAPTURE_SOFT_WAIT_MS = 50;
+const MAX_CAPTURE_SOFT_WAIT_MS = 50_000;
+const DEFAULT_CAPTURE_DEDUP_WINDOW_MS = 180_000;
+const MAX_CAPTURE_DEDUP_WINDOW_MS = 3_600_000;
 const DEFAULT_MAX_ITEMS = 3;
 const DEFAULT_MAX_CHARS = 600;
 const DEFAULT_PER_ITEM_MAX_CHARS = 220;
@@ -12,6 +21,7 @@ const DEFAULT_MIN_REPEATED_TURNS = 8;
 const DEFAULT_MAX_QUERY_CHARS = 2_000;
 const DEFAULT_MAX_ASSISTANT_CAPTURE_CHARS = 1_500;
 const MAX_TRACKED_SESSIONS = 256;
+const MAX_TRACKED_CAPTURES = 256;
 
 const RELEVANT_MEMORIES_MARKER = "<relevant-memories>";
 
@@ -27,6 +37,9 @@ const TRIVIAL_PROMPT_RE =
 
 /** @type {Map<string, { turnCount: number, recalledAtTurn: Record<string, number>, lastCapturedHash?: string, updatedAt: number }>} */
 const sessionMemoryState = new Map();
+
+/** @type {Map<string, { status: "in_flight" | "accepted" | "completed" | "timed_out", jobId?: string, result?: unknown, promise?: Promise<unknown>, updatedAt: number }>} */
+const captureToolState = new Map();
 
 /** @type {{ filePath: string, mtimeMs: number, values: Record<string, string> } | null} */
 let cachedEnvFile = null;
@@ -150,6 +163,35 @@ export function resolvePluginConfig(options = {}, env = process.env, homeDir = h
   const scope = asNonEmptyString(opts.scope) ?? asNonEmptyString(mergedEnv.MEMORY_SCOPE);
   const agentIdOverride = asNonEmptyString(opts.agentId);
 
+  const captureTimeoutMs = Math.min(
+    MAX_CAPTURE_TIMEOUT_MS,
+    Math.max(
+      MIN_CAPTURE_TIMEOUT_MS,
+      asPositiveInt(
+        opts.captureTimeoutMs ?? mergedEnv.MEMORY_CAPTURE_TIMEOUT_MS,
+        DEFAULT_CAPTURE_TIMEOUT_MS,
+      ),
+    ),
+  );
+  const maxSoftWaitMs = Math.min(MAX_CAPTURE_SOFT_WAIT_MS, captureTimeoutMs);
+  const captureSoftWaitMs = Math.min(
+    maxSoftWaitMs,
+    Math.max(
+      Math.min(MIN_CAPTURE_SOFT_WAIT_MS, maxSoftWaitMs),
+      asPositiveInt(
+        opts.captureSoftWaitMs ?? mergedEnv.MEMORY_CAPTURE_SOFT_WAIT_MS,
+        Math.min(DEFAULT_CAPTURE_SOFT_WAIT_MS, maxSoftWaitMs),
+      ),
+    ),
+  );
+  const captureDedupWindowMs = Math.min(
+    MAX_CAPTURE_DEDUP_WINDOW_MS,
+    asNonNegativeInt(
+      opts.captureDedupWindowMs ?? mergedEnv.MEMORY_CAPTURE_DEDUP_WINDOW_MS,
+      DEFAULT_CAPTURE_DEDUP_WINDOW_MS,
+    ),
+  );
+
   return {
     serverUrl,
     token,
@@ -160,12 +202,15 @@ export function resolvePluginConfig(options = {}, env = process.env, homeDir = h
     captureEnabled: asBoolean(opts.captureEnabled, true),
     captureWhenClientRecalled: asBoolean(opts.captureWhenClientRecalled, false),
     recallTimeoutMs: Math.min(
-      8_000,
+      MAX_RECALL_TIMEOUT_MS,
       asPositiveInt(
         opts.recallTimeoutMs ?? mergedEnv.MEMORY_HOOK_RECALL_TIMEOUT_MS,
         DEFAULT_RECALL_TIMEOUT_MS,
       ),
     ),
+    captureTimeoutMs,
+    captureSoftWaitMs,
+    captureDedupWindowMs,
     maxItems: asPositiveInt(opts.maxItems ?? mergedEnv.MEMORY_HOOK_RECALL_MAX_ITEMS, DEFAULT_MAX_ITEMS),
     maxChars: asPositiveInt(opts.maxChars ?? mergedEnv.MEMORY_HOOK_RECALL_MAX_CHARS, DEFAULT_MAX_CHARS),
     perItemMaxChars: asPositiveInt(
@@ -205,8 +250,63 @@ function getOrCreateSessionState(sessionKey) {
   return state;
 }
 
+export function computeCaptureKey(agentId, scope, conversationText) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        agentId: agentId ?? "",
+        scope: scope ?? "",
+        text: String(conversationText ?? "").trim(),
+      }),
+    )
+    .digest("hex");
+}
+
+function pruneCaptureToolState(windowMs, now = Date.now()) {
+  for (const [k, rec] of captureToolState.entries()) {
+    if (rec.status === "in_flight") continue;
+    if (windowMs <= 0 || now - rec.updatedAt >= windowMs) {
+      captureToolState.delete(k);
+    }
+  }
+}
+
+export function getCaptureDedupRecord(key, windowMs, now = Date.now()) {
+  pruneCaptureToolState(windowMs, now);
+  const rec = captureToolState.get(key);
+  if (!rec) return undefined;
+  if (rec.status === "in_flight") return rec;
+  if (windowMs > 0 && now - rec.updatedAt < windowMs) return rec;
+  captureToolState.delete(key);
+  return undefined;
+}
+
+export function setCaptureDedupRecord(key, record, now = Date.now()) {
+  if (captureToolState.size >= MAX_TRACKED_CAPTURES && !captureToolState.has(key)) {
+    let oldestKey;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [k, v] of captureToolState.entries()) {
+      if (v.status === "in_flight") continue;
+      if (v.updatedAt < oldestAt) {
+        oldestAt = v.updatedAt;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey === undefined) {
+      oldestKey = captureToolState.keys().next().value;
+    }
+    if (oldestKey !== undefined) captureToolState.delete(oldestKey);
+  }
+  captureToolState.set(key, { ...record, updatedAt: record.updatedAt ?? now });
+}
+
+export function deleteCaptureDedupRecord(key) {
+  captureToolState.delete(key);
+}
+
 export function resetSessionStateForTests() {
   sessionMemoryState.clear();
+  captureToolState.clear();
   cachedEnvFile = null;
 }
 
@@ -752,22 +852,36 @@ export async function onResponse(reply, ctx) {
   const contentHash = createHash("sha256").update(conversationText).digest("hex");
   if (state.lastCapturedHash === contentHash) return;
 
+  const { signal, cleanup } = combineSignals(ctx?.signal, cfg.captureTimeoutMs);
   try {
     const response = await fetch(`${cfg.serverUrl}/v1/capture`, {
       method: "POST",
-      headers: buildAuthHeaders(cfg.token),
+      headers: {
+        ...buildAuthHeaders(cfg.token),
+        "idempotency-key": contentHash,
+      },
       body: JSON.stringify({
         conversationText,
         sessionKey,
         agentId: asNonEmptyString(st.agentId) ?? "magpie",
         scope: cfg.scope,
+        mode: "async",
+        idempotencyKey: contentHash,
       }),
-      signal: ctx?.signal,
+      signal,
     });
     if (response.ok) {
       state.lastCapturedHash = contentHash;
     }
-  } catch {
+  } catch (error) {
+    if (
+      (error instanceof Error && error.name === "AbortError") ||
+      ctx?.signal?.aborted === true
+    ) {
+      state.lastCapturedHash = contentHash;
+    }
     // Fire-and-forget capture is strictly best-effort.
+  } finally {
+    cleanup();
   }
 }

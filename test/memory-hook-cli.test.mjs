@@ -97,6 +97,28 @@ describe("agent-memory-hook CLI", () => {
     assert.deepEqual(JSON.parse(stdout.text()), { created: 1, merged: 0 });
   });
 
+  it("forwards --wait on manual CLI capture when synchronous stats are requested", async () => {
+    const stdout = outputCollector();
+    const seen = { request: null };
+    const exitCode = await runMemoryHookCli(
+      ["capture", "--text", "Sync fact", "--wait"],
+      { MEMORY_SERVER_URL: "http://127.0.0.1:7337" },
+      { stdout: stdout.stream },
+      {
+        createClient: (config) => ({
+          baseUrl: config.baseUrl,
+          async health() { return { status: "ok", memories: 0, captureEnabled: true }; },
+          async recall() { return { count: 0, memories: [] }; },
+          async capture(request) { seen.request = request; return { created: 1, merged: 0 }; },
+        }),
+      },
+    );
+
+    assert.equal(exitCode, 0);
+    assert.equal(seen.request.wait, true);
+    assert.deepEqual(JSON.parse(stdout.text()), { created: 1, merged: 0 });
+  });
+
   it("renders no context block when recall is empty", () => {
     assert.equal(renderMemoriesForContext([]), "");
   });

@@ -22,7 +22,7 @@ async function withMockMemoryServer(handler, fn) {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
-    received.push({ url: req.url, auth: req.headers.authorization, body });
+    received.push({ url: req.url, auth: req.headers.authorization, headers: req.headers, body });
     await handler(req, res, body);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -55,6 +55,9 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
     assert.equal(typeof pkg.magpie?.options?.serverUrl, "string");
     assert.equal(typeof pkg.magpie?.options?.gatewayTimeoutMs, "number");
     assert.equal(typeof pkg.magpie?.options?.recallTimeoutMs, "number");
+    assert.equal(typeof pkg.magpie?.options?.captureTimeoutMs, "number");
+    assert.equal(typeof pkg.magpie?.options?.captureSoftWaitMs, "number");
+    assert.equal(typeof pkg.magpie?.options?.captureDedupWindowMs, "number");
     assert.ok(Array.isArray(pkg.magpie?.options?.skipCaptureAgents));
 
     assert.ok(Array.isArray(pkg.files) && pkg.files.length >= 5);
@@ -70,22 +73,25 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
     assert.ok(typeof reg.summary?.zh === "string" && reg.summary.zh.length > 10);
   });
 
-  it("exports a single OpenCode plugin function providing recall, capture, and health MCP tools", async () => {
+  it("exports a single OpenCode plugin function providing recall, capture (202 Accepted), and health MCP tools", async () => {
+    resetSessionStateForTests();
     const exportedFunctions = Object.entries(toolsEntry).filter(([, v]) => typeof v === "function");
     assert.equal(exportedFunctions.length, 1, "index.mjs must export only the single plugin entry function");
 
     await withMockMemoryServer(
       async (req, res) => {
-        res.writeHead(200, { "content-type": "application/json" });
         if (req.url === "/health") {
+          res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ status: "ok", memories: 7, captureEnabled: true }));
           return;
         }
         if (req.url === "/v1/recall") {
+          res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ count: 1, memories: [{ id: "t1", text: "Stored fact", score: 0.9 }] }));
           return;
         }
-        res.end(JSON.stringify({ created: 1, merged: 0 }));
+        res.writeHead(202, { "content-type": "application/json" });
+        res.end(JSON.stringify({ accepted: true, mode: "async", jobId: "job-123", status: "queued" }));
       },
       async ({ baseUrl, received }) => {
         const hooks = await toolsEntry.AgentMemoryToolsPlugin({}, { serverUrl: baseUrl, token: "tool-secret" });
@@ -102,7 +108,8 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
         assert.equal(r.count, 1);
 
         const c = await hooks.tool.capture.execute({ text: "We use Bun for Magpie plugins." }, { agent: "claude", abort });
-        assert.equal(c.created, 1);
+        assert.equal(c.accepted, true);
+        assert.equal(c.jobId, "job-123");
 
         const recallReq = received.find((x) => x.url === "/v1/recall");
         assert.equal(recallReq.auth, "Bearer tool-secret");
@@ -112,7 +119,98 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
         const captureReq = received.find((x) => x.url === "/v1/capture");
         assert.equal(captureReq.auth, "Bearer tool-secret");
         assert.equal(captureReq.body.agentId, "claude-code");
+        assert.equal(captureReq.body.mode, "async");
+        assert.match(captureReq.body.idempotencyKey, /^[0-9a-f]{64}$/);
+        assert.equal(captureReq.headers["idempotency-key"], captureReq.body.idempotencyKey);
         assert.match(captureReq.body.conversationText, /Bun for Magpie plugins/);
+      },
+    );
+  });
+
+  it("hands off slow synchronous captures before Magpie's tool cutoff, keeps the background POST alive, deduplicates retries, and clears dedup on fast errors", async () => {
+    resetSessionStateForTests();
+    let capturePostCount = 0;
+    let serverCompleted = false;
+    let failNext = false;
+
+    await withMockMemoryServer(
+      async (req, res) => {
+        if (failNext) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "internal_error", message: "boom" }));
+          return;
+        }
+        capturePostCount += 1;
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        serverCompleted = true;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ created: 1, merged: 0 }));
+      },
+      async ({ baseUrl }) => {
+        const hooks = await toolsEntry.AgentMemoryToolsPlugin({}, {
+          serverUrl: baseUrl,
+          token: "tool-secret",
+          captureTimeoutMs: 5_000,
+          captureSoftWaitMs: 120,
+          captureDedupWindowMs: 60_000,
+        });
+
+        // 1. Soft handoff triggers at ~120ms BEFORE ctx.abort (220ms), returning background acceptance.
+        const slowResult = await hooks.tool.capture.execute(
+          { text: "Style 05 royal crimson gem coin branding selected." },
+          { agent: "agy", abort: AbortSignal.timeout(220) },
+        );
+        assert.equal(slowResult.accepted, true);
+        assert.equal(slowResult.background, true);
+        assert.equal(slowResult.doNotRetry, true);
+        assert.equal(slowResult.status, "pending_server_processing");
+        assert.equal(capturePostCount, 1);
+
+        // 2. Immediate duplicate retry while in-flight does NOT issue a second POST.
+        const dupInFlight = await hooks.tool.capture.execute(
+          { text: "Style 05 royal crimson gem coin branding selected." },
+          { agent: "agy", abort: new AbortController().signal },
+        );
+        assert.equal(dupInFlight.accepted, true);
+        assert.equal(dupInFlight.deduplicated, true);
+        assert.equal(dupInFlight.doNotRetry, true);
+        assert.equal(dupInFlight.status, "in_flight");
+        assert.equal(capturePostCount, 1);
+
+        // 3. Wait for the decoupled background fetch to finish on the server.
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline && !serverCompleted) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        assert.equal(serverCompleted, true, "background capture fetch must finish despite caller ctx.abort");
+
+        // 4. Duplicate retry after completion still suppresses redundant POST.
+        const dupCompleted = await hooks.tool.capture.execute(
+          { text: "Style 05 royal crimson gem coin branding selected." },
+          { agent: "agy", abort: new AbortController().signal },
+        );
+        assert.equal(dupCompleted.accepted, true);
+        assert.equal(dupCompleted.deduplicated, true);
+        assert.equal(dupCompleted.doNotRetry, true);
+        assert.equal(capturePostCount, 1);
+
+        // 5. Fast HTTP error rejects immediately AND clears dedup record so retry succeeds.
+        failNext = true;
+        await assert.rejects(
+          () => hooks.tool.capture.execute(
+            { text: "Transient error payload" },
+            { agent: "agy", abort: new AbortController().signal },
+          ),
+          /Agent Memory Server error \(500\): internal_error: boom/,
+        );
+
+        failNext = false;
+        const retryAfterError = await hooks.tool.capture.execute(
+          { text: "Transient error payload" },
+          { agent: "agy", abort: new AbortController().signal },
+        );
+        assert.equal(retryAfterError.accepted, true);
+        assert.equal(capturePostCount, 2);
       },
     );
   });
@@ -138,8 +236,8 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
           }));
           return;
         }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ created: 1 }));
+        res.writeHead(202, { "content-type": "application/json" });
+        res.end(JSON.stringify({ accepted: true, jobId: "hook-job-1" }));
       },
       async ({ baseUrl, received }) => {
         writeFileSync(envFile, `MEMORY_SERVER_URL=${baseUrl}\nMEMORY_SERVER_TOKEN=magpie-secret\n`, { mode: 0o600 });
@@ -264,6 +362,7 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
         const captures = received.filter((r) => r.url === "/v1/capture");
         assert.equal(captures.length, 4);
         assert.ok(captures.every((c) => c.auth === "Bearer magpie-secret"));
+        assert.ok(captures.every((c) => c.body.mode === "async" && /^[0-9a-f]{64}$/.test(c.body.idempotencyKey)));
         // Verify thinking blocks were stripped in Anthropic and Gemini captures.
         const anthCap = captures.find((c) => c.body.agentId === "vscode");
         assert.ok(!anthCap.body.conversationText.includes("internal thought"));
@@ -275,6 +374,44 @@ describe("Magpie gateway hook plugin (integrations/magpie)", () => {
     );
 
     rmSync(envDir, { recursive: true, force: true });
+  });
+
+  it("does not re-post onResponse capture after an AbortError timeout", async () => {
+    resetSessionStateForTests();
+    let captureCount = 0;
+    let releaseFirst;
+    await withMockMemoryServer(
+      async (req, res) => {
+        if (req.url === "/v1/capture") {
+          captureCount += 1;
+          await new Promise((resolve) => { releaseFirst = resolve; });
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ created: 1 }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ count: 0, memories: [] }));
+      },
+      async ({ baseUrl }) => {
+        const ctx = {
+          origin: "local",
+          protocol: "chat",
+          agent: "grok",
+          session: "sess-abort",
+          query: "How should we avoid duplicate capture retries?",
+          options: { serverUrl: baseUrl, token: "t1", recallEnabled: false },
+          state: {},
+          signal: new AbortController().signal,
+          report() {},
+        };
+        await onRequest({ messages: [{ role: "user", content: ctx.query }] }, ctx);
+        const reply = { choices: [{ message: { role: "assistant", content: "Use idempotency keys." } }] };
+        await onResponse(reply, { ...ctx, success: true, signal: AbortSignal.timeout(40) });
+        await onResponse(reply, { ...ctx, success: true, signal: new AbortController().signal });
+        assert.equal(captureCount, 1);
+        releaseFirst?.();
+      },
+    );
   });
 
   it("enforces local-origin gate, skips tool continuations and already-injected client hooks, and respects skipAgents/skipCaptureAgents", async () => {

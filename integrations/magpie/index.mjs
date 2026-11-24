@@ -1,4 +1,10 @@
-import { resolvePluginConfig } from "./agent-memory.hooks.mjs";
+import {
+  computeCaptureKey,
+  deleteCaptureDedupRecord,
+  getCaptureDedupRecord,
+  resolvePluginConfig,
+  setCaptureDedupRecord,
+} from "./agent-memory.hooks.mjs";
 
 const AGENT_ID_ALIASES = {
   claude: "claude-code",
@@ -40,9 +46,66 @@ async function fetchJson(url, init) {
   }
   if (!response.ok) {
     const detail = typeof parsed?.error === "string" ? parsed.error : `HTTP ${response.status}`;
-    throw new Error(`Agent Memory Server error (${response.status}): ${detail}`);
+    const message =
+      typeof parsed?.message === "string" && parsed.message.trim()
+        ? `: ${parsed.message.trim()}`
+        : "";
+    throw new Error(`Agent Memory Server error (${response.status}): ${detail}${message}`);
   }
   return parsed;
+}
+
+function awaitWithSoftCutoff(promise, abortSignal, softWaitMs) {
+  if (abortSignal?.aborted) {
+    return Promise.resolve({ settled: false, reason: "aborted" });
+  }
+
+  return new Promise((resolve, reject) => {
+    let done = false;
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timer;
+
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+    };
+
+    const onAbort = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve({ settled: false, reason: "aborted" });
+    };
+
+    if (abortSignal) {
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    if (Number.isFinite(softWaitMs)) {
+      timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve({ settled: false, reason: "soft_timeout" });
+      }, softWaitMs);
+      timer.unref?.();
+    }
+
+    promise.then(
+      (value) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve({ settled: true, value });
+      },
+      (error) => {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
@@ -108,7 +171,7 @@ export async function AgentMemoryToolsPlugin(_input, options = {}) {
 
       capture: {
         description:
-          "Submit a durable user preference, architecture decision, or project fact to Agent Memory Server (smart extraction and deduplication run server-side; never pass secrets or tokens).",
+          "Submit a durable user preference, architecture decision, or project fact to Agent Memory Server (smart extraction and deduplication run server-side; never pass secrets or tokens). Returns immediately when the server queues asynchronously, or hands off cleanly before Magpie's 55s cutoff on slow sync servers — do not immediately retry an accepted, pending, or timed-out capture.",
         args: {
           type: "object",
           properties: {
@@ -128,6 +191,11 @@ export async function AgentMemoryToolsPlugin(_input, options = {}) {
               type: "string",
               description: "Optional logical agent ID override (defaults to the calling agent).",
             },
+            wait: {
+              type: "boolean",
+              description:
+                "Optional flag asking the server to wait synchronously for extraction stats instead of returning an async job.",
+            },
           },
           required: ["text"],
         },
@@ -143,18 +211,132 @@ export async function AgentMemoryToolsPlugin(_input, options = {}) {
             typeof args?.sessionKey === "string" && args.sessionKey.trim()
               ? args.sessionKey.trim()
               : `magpie-tool:${agentId}`;
+          const wait = typeof args?.wait === "boolean" ? args.wait : undefined;
+          const idempotencyKey = computeCaptureKey(agentId, scope, conversationText);
 
-          return await fetchJson(`${cfg.serverUrl}/v1/capture`, {
-            method: "POST",
-            headers: authHeaders(cfg.token),
-            body: JSON.stringify({
-              conversationText,
-              sessionKey,
-              agentId,
-              scope,
-            }),
-            signal: ctx?.abort,
+          const existing = getCaptureDedupRecord(idempotencyKey, cfg.captureDedupWindowMs);
+          if (existing) {
+            if (existing.status === "in_flight") {
+              if (!wait) {
+                return {
+                  accepted: true,
+                  deduplicated: true,
+                  status: "in_flight",
+                  idempotencyKey,
+                  ...(existing.jobId ? { jobId: existing.jobId } : {}),
+                  doNotRetry: true,
+                  message: "An identical capture request is already in progress. Do not retry.",
+                };
+              }
+              const waited = await awaitWithSoftCutoff(
+                existing.promise,
+                ctx?.abort,
+                Number.POSITIVE_INFINITY,
+              );
+              if (waited.settled) return waited.value;
+              throw new Error(
+                `Capture is still running on the server (background timeout ${Math.round(cfg.captureTimeoutMs / 1000)}s); do not immediately retry — verify later with recall.`,
+              );
+            }
+
+            const base = existing.result && typeof existing.result === "object" ? existing.result : {};
+            return {
+              ...base,
+              accepted: true,
+              deduplicated: true,
+              status: existing.status,
+              idempotencyKey,
+              doNotRetry: true,
+              message:
+                "Identical capture was recently submitted; skipping duplicate request. Do not retry.",
+            };
+          }
+
+          const bgCtl = new AbortController();
+          const bgTimeoutErr = new Error(
+            `Agent Memory Server capture timed out after ${cfg.captureTimeoutMs}ms`,
+          );
+          bgTimeoutErr.name = "CaptureBackgroundTimeoutError";
+          const bgTimer = setTimeout(() => bgCtl.abort(bgTimeoutErr), cfg.captureTimeoutMs);
+          bgTimer.unref?.();
+
+          const bgPromise = (async () => {
+            try {
+              const parsed = await fetchJson(`${cfg.serverUrl}/v1/capture`, {
+                method: "POST",
+                headers: {
+                  ...authHeaders(cfg.token),
+                  "idempotency-key": idempotencyKey,
+                },
+                body: JSON.stringify({
+                  conversationText,
+                  sessionKey,
+                  agentId,
+                  scope,
+                  mode: wait ? "sync" : "async",
+                  ...(wait !== undefined ? { wait } : {}),
+                  idempotencyKey,
+                }),
+                signal: bgCtl.signal,
+              });
+              if (parsed?.llmUnavailable === true) {
+                deleteCaptureDedupRecord(idempotencyKey);
+              } else {
+                setCaptureDedupRecord(idempotencyKey, {
+                  status: parsed?.accepted ? "accepted" : "completed",
+                  ...(typeof parsed?.jobId === "string" ? { jobId: parsed.jobId } : {}),
+                  result: parsed,
+                });
+              }
+              return parsed;
+            } catch (error) {
+              if (bgCtl.signal.aborted && bgCtl.signal.reason === bgTimeoutErr) {
+                setCaptureDedupRecord(idempotencyKey, { status: "timed_out" });
+              } else {
+                deleteCaptureDedupRecord(idempotencyKey);
+              }
+              throw error;
+            } finally {
+              clearTimeout(bgTimer);
+            }
+          })();
+          bgPromise.catch(() => {});
+
+          setCaptureDedupRecord(idempotencyKey, {
+            status: "in_flight",
+            promise: bgPromise,
           });
+
+          if (wait === true) {
+            const outcome = await awaitWithSoftCutoff(
+              bgPromise,
+              ctx?.abort,
+              Number.POSITIVE_INFINITY,
+            );
+            if (outcome.settled) return outcome.value;
+            throw new Error(
+              `Capture is still running on the server (background timeout ${Math.round(cfg.captureTimeoutMs / 1000)}s); do not immediately retry — verify later with recall.`,
+            );
+          }
+
+          const outcome = await awaitWithSoftCutoff(
+            bgPromise,
+            ctx?.abort,
+            cfg.captureSoftWaitMs,
+          );
+          if (outcome.settled) return outcome.value;
+
+          return {
+            accepted: true,
+            status: "pending_server_processing",
+            background: true,
+            idempotencyKey,
+            waitedMs: cfg.captureSoftWaitMs,
+            backgroundTimeoutMs: cfg.captureTimeoutMs,
+            doNotRetry: true,
+            message:
+              "Capture request is still running on the server and was handed off to background completion before Magpie's 55s tool cutoff. Do not retry; verify with recall later.",
+          };
         },
       },
 

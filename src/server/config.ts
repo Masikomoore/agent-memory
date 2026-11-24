@@ -11,12 +11,22 @@ export interface MemoryServerHttpConfig {
   maxBodyBytes: number;
 }
 
+export interface MemoryServerCaptureQueueConfig {
+  asyncDefault: boolean;
+  concurrency: number;
+  maxQueueSize: number;
+  dedupWindowMs: number;
+  shutdownTimeoutMs: number;
+  spoolEnabled: boolean;
+}
+
 export interface MemoryServerConfig {
   http: MemoryServerHttpConfig;
   dbPath: string;
   embedding: EmbeddingConfig;
   llm?: LlmClientConfig;
   captureEnabled: boolean;
+  captureQueue: MemoryServerCaptureQueueConfig;
   defaultAgentId: string;
   defaultWriteScope: string;
 }
@@ -150,6 +160,15 @@ export function loadMemoryServerConfig(
     };
   }
 
+  const captureQueue: MemoryServerCaptureQueueConfig = {
+    asyncDefault: readBoolean(env, "MEMORY_CAPTURE_ASYNC", true),
+    concurrency: readInt(env, "MEMORY_CAPTURE_CONCURRENCY", 1, 1, 8),
+    maxQueueSize: readInt(env, "MEMORY_CAPTURE_MAX_QUEUE", 128, 1, 10_000),
+    dedupWindowMs: readInt(env, "MEMORY_CAPTURE_DEDUP_WINDOW_MS", 300_000, 0, 3_600_000),
+    shutdownTimeoutMs: readInt(env, "MEMORY_CAPTURE_SHUTDOWN_TIMEOUT_MS", 30_000, 100, 600_000),
+    spoolEnabled: readBoolean(env, "MEMORY_CAPTURE_SPOOL", true),
+  };
+
   return {
     http: {
       host,
@@ -163,6 +182,7 @@ export function loadMemoryServerConfig(
     embedding,
     llm,
     captureEnabled,
+    captureQueue,
     defaultAgentId: readString(env, "MEMORY_SERVER_DEFAULT_AGENT") ?? "main",
     defaultWriteScope: readString(env, "MEMORY_SERVER_DEFAULT_WRITE_SCOPE") ?? "global",
   };

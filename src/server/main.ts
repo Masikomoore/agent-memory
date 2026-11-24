@@ -13,9 +13,14 @@ async function main(): Promise<void> {
     server.listen(config.http.port, config.http.host, () => resolve());
   });
 
+  const recovered = await runtime.recoverPendingCaptures();
+  if (recovered > 0) {
+    console.log(`memory-server: recovered ${recovered} pending capture job(s) from spool`);
+  }
+
   console.log(
     `memory-server@${MEMORY_SERVER_VERSION}: listening on http://${config.http.host}:${config.http.port} ` +
-      `(mcp=/mcp, rest=/v1, db=${config.dbPath}, capture=${config.captureEnabled ? "ON" : "OFF"})`,
+      `(mcp=/mcp, rest=/v1, db=${config.dbPath}, capture=${config.captureEnabled ? "ON" : "OFF"}, captureMode=${config.captureQueue.asyncDefault ? "async" : "sync"})`,
   );
 
   let closing = false;
@@ -24,6 +29,7 @@ async function main(): Promise<void> {
     closing = true;
     console.log(`memory-server: received ${signal}, shutting down`);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await runtime.close();
     process.exitCode = 0;
   };
 

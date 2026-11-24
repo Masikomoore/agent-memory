@@ -1,6 +1,6 @@
 {
   "name": "magpie-agent-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "main": "./index.mjs",
   "description": "Shared long-term memory for every agent routed through Magpie — automatic pre-request recall, background capture, and built-in MCP memory tools powered by Agent Memory Server.",
@@ -41,6 +41,9 @@
       "serverUrl": "http://127.0.0.1:7337",
       "gatewayTimeoutMs": 8000,
       "recallTimeoutMs": 2500,
+      "captureTimeoutMs": 150000,
+      "captureSoftWaitMs": 45000,
+      "captureDedupWindowMs": 180000,
       "recallEnabled": true,
       "captureEnabled": true,
       "maxItems": 3,

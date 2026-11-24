@@ -28,9 +28,17 @@ export interface MemoryCaptureRequest extends ExtractPersistOptions {
   sessionKey?: string;
 }
 
+export interface ValidatedMemoryCaptureRequest extends MemoryCaptureRequest {
+  sessionKey: string;
+  agentId: string;
+  scope: string;
+  scopeFilter?: string[];
+}
+
 export interface MemoryService {
   recall(request: MemoryRecallRequest): Promise<RetrievalResult[]>;
   capture(request: MemoryCaptureRequest): Promise<ExtractionStats>;
+  validateCapture?(request: MemoryCaptureRequest): ValidatedMemoryCaptureRequest;
 }
 
 export interface MemoryServiceConfig {
@@ -86,7 +94,48 @@ export function createMemoryService(
     return normalized;
   };
 
+  const validateCapture = (request: MemoryCaptureRequest): ValidatedMemoryCaptureRequest => {
+    const smartExtractor = extractionRuntime?.smartExtractor;
+    if (!smartExtractor) {
+      throw new MemoryServiceError(
+        "Memory capture requires an enabled extraction runtime",
+        "capture_unavailable",
+        503,
+      );
+    }
+    const {
+      conversationText,
+      sessionKey,
+      ...options
+    } = request;
+    if (!conversationText?.trim()) {
+      throw new MemoryServiceError(
+        "Memory capture conversationText cannot be empty",
+        "invalid_conversation",
+        400,
+      );
+    }
+
+    const agentId = resolveAgentId(options.agentId);
+    const requestedScope = options.scope ?? config.defaultWriteScope ?? core.scopeManager.getDefaultScope(agentId);
+    const targetScope = requireAccessibleScope(requestedScope, agentId);
+    const trustedScopeOverride = Object.prototype.hasOwnProperty.call(options, "scopeFilter")
+      ? options.scopeFilter
+      : [targetScope];
+
+    return {
+      ...options,
+      conversationText,
+      sessionKey: sessionKey?.trim() || "unknown",
+      agentId,
+      scope: targetScope,
+      scopeFilter: trustedScopeOverride,
+    };
+  };
+
   return {
+    validateCapture,
+
     async recall(request) {
       const query = request.query?.trim();
       if (!query) {
@@ -148,40 +197,12 @@ export function createMemoryService(
     },
 
     async capture(request) {
-      const smartExtractor = extractionRuntime?.smartExtractor;
-      if (!smartExtractor) {
-        throw new MemoryServiceError(
-          "Memory capture requires an enabled extraction runtime",
-          "capture_unavailable",
-          503,
-        );
-      }
-      const {
-        conversationText,
-        sessionKey = "unknown",
-        ...options
-      } = request;
-      if (!conversationText?.trim()) {
-        throw new MemoryServiceError(
-          "Memory capture conversationText cannot be empty",
-          "invalid_conversation",
-          400,
-        );
-      }
-
-      const agentId = resolveAgentId(options.agentId);
-      const requestedScope = options.scope ?? config.defaultWriteScope ?? core.scopeManager.getDefaultScope(agentId);
-      const targetScope = requireAccessibleScope(requestedScope, agentId);
-      const trustedScopeOverride = Object.prototype.hasOwnProperty.call(options, "scopeFilter")
-        ? options.scopeFilter
-        : [targetScope];
-
-      return smartExtractor.extractAndPersist(conversationText, sessionKey, {
-        ...options,
-        agentId,
-        scope: targetScope,
-        scopeFilter: trustedScopeOverride,
-      });
+      const validated = validateCapture(request);
+      return extractionRuntime!.smartExtractor!.extractAndPersist(
+        validated.conversationText,
+        validated.sessionKey,
+        validated,
+      );
     },
   };
 }

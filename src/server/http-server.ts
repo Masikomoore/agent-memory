@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { validateHostHeader, validateOriginHeader } from "@modelcontextprotocol/server";
 import { MemoryServiceError, type MemoryService } from "../core/memory-service.js";
+import { CaptureJobQueue } from "./capture-queue.js";
 import type { MemoryServerHttpConfig } from "./config.js";
 import {
   createMemoryMcpNodeHandler,
@@ -12,6 +13,7 @@ import {
 
 export interface MemoryHttpRuntime extends MemoryMcpRuntime {
   service: MemoryService;
+  captureQueue?: CaptureJobQueue;
 }
 
 export interface MemoryHttpLogger {
@@ -160,9 +162,74 @@ function optionalRecallSource(value: unknown): "manual" | "auto-recall" | "cli" 
   );
 }
 
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean") return value;
+  throw new MemoryServiceError(`${field} must be a boolean`, "invalid_body", 400);
+}
+
+function optionalCaptureMode(value: unknown): "async" | "sync" | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === "async" || value === "sync") return value;
+  throw new MemoryServiceError('mode must be "async" or "sync"', "invalid_body", 400);
+}
+
+function optionalIdempotencyKey(
+  bodyValue: unknown,
+  headerValue: string | string[] | undefined,
+): string | undefined {
+  let fromBody: string | undefined;
+  if (bodyValue !== undefined && bodyValue !== null) {
+    if (typeof bodyValue !== "string" || !bodyValue.trim()) {
+      throw new MemoryServiceError("idempotencyKey must be a non-empty string", "invalid_body", 400);
+    }
+    fromBody = bodyValue.trim();
+    if (fromBody.length > 256) {
+      throw new MemoryServiceError("idempotencyKey must be at most 256 characters", "invalid_body", 400);
+    }
+  }
+
+  let fromHeader: string | undefined;
+  if (headerValue !== undefined) {
+    if (Array.isArray(headerValue)) {
+      throw new MemoryServiceError("idempotency-key header must appear at most once", "invalid_body", 400);
+    }
+    const trimmed = headerValue.trim();
+    if (!trimmed) {
+      throw new MemoryServiceError("idempotency-key header must be a non-empty string", "invalid_body", 400);
+    }
+    if (trimmed.length > 256) {
+      throw new MemoryServiceError("idempotency-key header must be at most 256 characters", "invalid_body", 400);
+    }
+    fromHeader = trimmed;
+  }
+
+  if (fromBody && fromHeader && fromBody !== fromHeader) {
+    throw new MemoryServiceError(
+      "idempotencyKey body field and idempotency-key header do not match",
+      "invalid_body",
+      400,
+    );
+  }
+  return fromBody ?? fromHeader;
+}
+
+function parseWaitQueryParam(rawUrl: string | undefined): boolean | undefined {
+  const raw = rawUrl || "/";
+  const queryIndex = raw.indexOf("?");
+  if (queryIndex === -1) return undefined;
+  const params = new URLSearchParams(raw.slice(queryIndex + 1));
+  if (!params.has("wait")) return undefined;
+  const value = (params.get("wait") ?? "").trim().toLowerCase();
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw new MemoryServiceError("wait query parameter must be true or false", "invalid_query", 400);
+}
+
 function writeError(res: ServerResponse, error: unknown, logger: MemoryHttpLogger): void {
   if (error instanceof MemoryServiceError) {
-    writeJson(res, error.statusCode, { error: error.code, message: error.message });
+    const headers: Record<string, string> = error.statusCode === 429 ? { "retry-after": "5" } : {};
+    writeJson(res, error.statusCode, { error: error.code, message: error.message }, headers);
     return;
   }
   logger.error(`memory-server: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
@@ -174,7 +241,14 @@ export function createMemoryHttpServer(
   config: MemoryServerHttpConfig,
   logger: MemoryHttpLogger = CONSOLE_LOGGER,
 ): http.Server {
-  const { nodeHandler: mcpNodeHandler } = createMemoryMcpNodeHandler(runtime);
+  const captureQueue = runtime.captureQueue ?? new CaptureJobQueue(runtime.service, {
+    defaultAsync: true,
+    logger,
+  });
+  const mcpRuntime: MemoryMcpRuntime = runtime.captureQueue
+    ? runtime
+    : { ...runtime, captureQueue };
+  const { nodeHandler: mcpNodeHandler } = createMemoryMcpNodeHandler(mcpRuntime);
 
   return http.createServer(async (req, res) => {
     try {
@@ -213,13 +287,70 @@ export function createMemoryHttpServer(
 
       if (path === "/v1/capture" && req.method === "POST") {
         const body = asRecord(await readJsonBody(req, config.maxBodyBytes));
-        const result = await runtime.service.capture({
+        const waitQuery = parseWaitQueryParam(req.url);
+        const waitBody = optionalBoolean(body.wait, "wait");
+        const modeBody = optionalCaptureMode(body.mode);
+        if (waitQuery !== undefined && waitBody !== undefined && waitQuery !== waitBody) {
+          throw new MemoryServiceError(
+            "wait query parameter and wait body field do not match",
+            "invalid_body",
+            400,
+          );
+        }
+        const explicitWait = waitBody ?? waitQuery;
+        if (
+          (explicitWait === true && modeBody === "async") ||
+          (explicitWait === false && modeBody === "sync")
+        ) {
+          throw new MemoryServiceError("wait and mode options conflict", "invalid_body", 400);
+        }
+        const shouldWait =
+          explicitWait !== undefined
+            ? explicitWait
+            : modeBody !== undefined
+              ? modeBody === "sync"
+              : !captureQueue.defaultAsync;
+
+        const idempotencyKey = optionalIdempotencyKey(
+          body.idempotencyKey,
+          req.headers["idempotency-key"],
+        );
+        const captureRequest = {
           conversationText: requiredString(body.conversationText, "conversationText"),
           sessionKey: optionalString(body.sessionKey, "sessionKey"),
           agentId: optionalString(body.agentId, "agentId") ?? runtime.defaultAgentId,
           scope: optionalString(body.scope, "scope") ?? runtime.defaultWriteScope,
+        };
+
+        if (shouldWait) {
+          const result = await captureQueue.enqueueAndWait({
+            request: captureRequest,
+            idempotencyKey,
+          });
+          writeJson(res, 200, result);
+          return;
+        }
+
+        const { snapshot } = await captureQueue.enqueue({
+          request: captureRequest,
+          idempotencyKey,
         });
-        writeJson(res, 200, result);
+        writeJson(res, 202, snapshot, { location: `/v1/capture/${snapshot.jobId}` });
+        return;
+      }
+
+      const captureJobMatch = /^\/v1\/capture\/([A-Za-z0-9_-]+)$/.exec(path);
+      if (captureJobMatch) {
+        if (req.method !== "GET") {
+          writeJson(res, 405, { error: "method_not_allowed", message: "Use GET for this endpoint" });
+          return;
+        }
+        const job = captureQueue.getJob(captureJobMatch[1]);
+        if (!job) {
+          writeJson(res, 404, { error: "not_found", message: "Capture job not found" });
+          return;
+        }
+        writeJson(res, 200, job);
         return;
       }
 

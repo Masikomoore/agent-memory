@@ -102,15 +102,31 @@ describe("shared memory across independent MCP clients", () => {
       assert.match(writer.client.getInstructions() ?? "", /agentId/);
       assert.match(writer.client.getInstructions() ?? "", /untrusted historical data/i);
 
-      const capture = await writer.client.callTool({
+      const asyncCapture = await writer.client.callTool({
         name: "memory_capture",
         arguments: {
           conversationText: "interop-sapphire-742 is the cross-agent verification phrase",
           agentId: "claude-code",
         },
       });
-      assert.equal(capture.isError ?? false, false);
-      assert.equal(capture.structuredContent.created, 1);
+      assert.equal(asyncCapture.isError ?? false, false);
+      assert.equal(asyncCapture.structuredContent.accepted, true);
+      assert.equal(asyncCapture.structuredContent.mode, "async");
+      assert.match(asyncCapture.structuredContent.jobId, /^[0-9a-f-]+$/);
+
+      // Give the async background queue a tick to settle before recalling.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const syncCapture = await writer.client.callTool({
+        name: "memory_capture",
+        arguments: {
+          conversationText: "interop-amber-901 is the synchronous verification phrase",
+          agentId: "claude-code",
+          wait: true,
+        },
+      });
+      assert.equal(syncCapture.isError ?? false, false);
+      assert.equal(syncCapture.structuredContent.created, 1);
 
       const recalled = await reader.client.callTool({
         name: "memory_recall",
@@ -123,6 +139,16 @@ describe("shared memory across independent MCP clients", () => {
       assert.equal(recalled.structuredContent.count, 1);
       assert.match(recalled.structuredContent.memories[0].text, /interop-sapphire-742/);
       assert.equal(recalled.structuredContent.memories[0].scope, "global");
+
+      const recalledSync = await reader.client.callTool({
+        name: "memory_recall",
+        arguments: {
+          query: "interop-amber-901",
+          agentId: "codex",
+        },
+      });
+      assert.equal(recalledSync.isError ?? false, false);
+      assert.equal(recalledSync.structuredContent.count, 1);
       assert.equal(calls.capture.at(-1).agentId, "claude-code");
       assert.equal(calls.capture.at(-1).scope, "global");
       assert.equal(calls.recall.at(-1).agentId, "codex");

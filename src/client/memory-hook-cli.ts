@@ -88,6 +88,7 @@ const BOOLEAN_FLAGS = new Set([
   "help",
   "json",
   "sync",
+  "wait",
   "apply",
   "dry-run",
   "uninstall",
@@ -303,6 +304,8 @@ export async function executeCaptureWorkerTask(
       sessionKey: task.sessionKey,
       agentId: task.agentId,
       scope: task.scope,
+      mode: "async",
+      idempotencyKey: delta.contentHash,
     });
 
     if (task.deleteStateAfter) {
@@ -877,7 +880,7 @@ function helpText(): string {
     `  agent-memory-hook doctor [${hostList}] [--env-file PATH] [--json]`,
     "  agent-memory-hook health",
     "  agent-memory-hook recall [--query TEXT] [--limit N] [--agent-id ID] [--scope SCOPE] [--json]",
-    "  agent-memory-hook capture [--text TEXT] [--session-key KEY] [--agent-id ID] [--scope SCOPE]",
+    "  agent-memory-hook capture [--text TEXT] [--session-key KEY] [--agent-id ID] [--scope SCOPE] [--wait]",
     "",
     "Environment (or ~/.config/agent-memory/hook.env):",
     "  MEMORY_SERVER_URL, MEMORY_SERVER_TOKEN, MEMORY_AGENT_ID, MEMORY_SCOPE,",
@@ -967,6 +970,7 @@ export async function runMemoryHookCli(
       sessionKey: stringOption(parsed.options, "session-key"),
       agentId,
       scope,
+      ...(parsed.options.has("wait") ? { wait: true } : {}),
     });
     stdout.write(`${JSON.stringify(result)}\n`);
     return 0;

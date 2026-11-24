@@ -44,6 +44,9 @@ export interface RemoteCaptureRequest {
   sessionKey?: string;
   agentId?: string;
   scope?: string;
+  wait?: boolean;
+  mode?: "async" | "sync";
+  idempotencyKey?: string;
 }
 
 export interface RemoteHealthResponse {
@@ -70,6 +73,7 @@ export interface MemoryHttpClient {
   health(): Promise<RemoteHealthResponse>;
   recall(request: RemoteRecallRequest): Promise<RemoteRecallResponse>;
   capture(request: RemoteCaptureRequest): Promise<Record<string, unknown>>;
+  captureStatus?(jobId: string): Promise<Record<string, unknown>>;
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -188,5 +192,7 @@ export function createMemoryHttpClient(config: MemoryHttpClientConfig): MemoryHt
     health: () => requestJson<RemoteHealthResponse>("GET", "/health"),
     recall: (request) => requestJson<RemoteRecallResponse>("POST", "/v1/recall", request),
     capture: (request) => requestJson<Record<string, unknown>>("POST", "/v1/capture", request),
+    captureStatus: (jobId) =>
+      requestJson<Record<string, unknown>>("GET", `/v1/capture/${encodeURIComponent(jobId)}`),
   };
 }

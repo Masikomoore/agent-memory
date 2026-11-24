@@ -24,7 +24,8 @@ Defaults:
 - database: `./data/memory-server`
 - MCP: `POST /mcp`
 - REST recall: `POST /v1/recall`
-- REST capture: `POST /v1/capture`
+- REST capture: `POST /v1/capture` (queues asynchronously by default and returns `202 Accepted` with `Location: /v1/capture/:jobId`; pass `"wait": true` or `?wait=true` for synchronous `200 OK`)
+- REST capture status: `GET /v1/capture/:jobId`
 - health: `GET /health`
 - caller identity: `main`
 - capture write scope: `global` (shared by agents)
@@ -45,7 +46,17 @@ curl -X POST http://127.0.0.1:7337/v1/recall \
 curl -X POST http://127.0.0.1:7337/v1/capture \
   -H 'content-type: application/json' \
   -d '{"conversationText":"The user prefers dark mode in every IDE.","agentId":"cursor"}'
+
+# Poll async capture job status (using jobId returned by 202 Accepted)
+curl http://127.0.0.1:7337/v1/capture/<jobId>
+
+# Optional synchronous capture when extraction stats are needed immediately
+curl -X POST 'http://127.0.0.1:7337/v1/capture?wait=true' \
+  -H 'content-type: application/json' \
+  -d '{"conversationText":"The user prefers dark mode in every IDE.","agentId":"cursor","idempotencyKey":"turn-42"}'
 ```
+
+`POST /v1/capture` and the MCP `memory_capture` tool validate authorization and input synchronously, deduplicate identical payloads or `idempotencyKey` retries within `MEMORY_CAPTURE_DEDUP_WINDOW_MS`, and serialize extraction/embedding jobs in the background (`202 Accepted`) so clients with ~60s tool timeouts do not abort and trigger duplicate retries. Passing `"wait": true` (or setting `MEMORY_CAPTURE_ASYNC=false`) switches to `200 OK` synchronous completion.
 
 ## OpenClaw remote mode
 
@@ -107,6 +118,12 @@ Authorization: Bearer <MEMORY_SERVER_TOKEN>
 | `MEMORY_SERVER_DEFAULT_AGENT` | `main` | Caller identity fallback |
 | `MEMORY_SERVER_DEFAULT_WRITE_SCOPE` | `global` | Shared capture scope |
 | `MEMORY_CAPTURE_ENABLED` | `true` | Enable SmartExtractor capture |
+| `MEMORY_CAPTURE_ASYNC` | `true` | Queue `POST /v1/capture` and MCP `memory_capture` asynchronously (`202 Accepted`) by default |
+| `MEMORY_CAPTURE_CONCURRENCY` | `1` | Maximum concurrent background capture jobs (`1`–`8`) |
+| `MEMORY_CAPTURE_MAX_QUEUE` | `128` | Maximum queued background capture jobs before HTTP `429 capture_queue_full` (`1`–`10000`) |
+| `MEMORY_CAPTURE_DEDUP_WINDOW_MS` | `300000` | In-flight + completed capture deduplication window in ms (`0`–`3600000`) |
+| `MEMORY_CAPTURE_SHUTDOWN_TIMEOUT_MS` | `30000` | Graceful drain timeout for queued/running captures on `SIGINT`/`SIGTERM` |
+| `MEMORY_CAPTURE_SPOOL` | `true` | Persist queued/running capture jobs under `<dbPath>/.capture-queue` for crash recovery |
 | `MEMORY_EMBEDDING_API_KEY` | — | Embedding provider key |
 | `MEMORY_EMBEDDING_BASE_URL` | OpenAI default | OpenAI-compatible embedding endpoint |
 | `MEMORY_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |

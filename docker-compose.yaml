@@ -17,6 +17,12 @@ services:
       MEMORY_SERVER_DEFAULT_AGENT: main
       MEMORY_SERVER_DEFAULT_WRITE_SCOPE: global
       MEMORY_CAPTURE_ENABLED: "true"
+      MEMORY_CAPTURE_ASYNC: "${MEMORY_CAPTURE_ASYNC:-true}"
+      MEMORY_CAPTURE_CONCURRENCY: "${MEMORY_CAPTURE_CONCURRENCY:-1}"
+      MEMORY_CAPTURE_MAX_QUEUE: "${MEMORY_CAPTURE_MAX_QUEUE:-128}"
+      MEMORY_CAPTURE_DEDUP_WINDOW_MS: "${MEMORY_CAPTURE_DEDUP_WINDOW_MS:-300000}"
+      MEMORY_CAPTURE_SHUTDOWN_TIMEOUT_MS: "${MEMORY_CAPTURE_SHUTDOWN_TIMEOUT_MS:-30000}"
+      MEMORY_CAPTURE_SPOOL: "${MEMORY_CAPTURE_SPOOL:-true}"
       MEMORY_EMBEDDING_BASE_URL: "${MEMORY_EMBEDDING_BASE_URL:-http://ollama:11434/v1}"
       MEMORY_EMBEDDING_API_KEY: "${MEMORY_EMBEDDING_API_KEY:-}"
       MEMORY_EMBEDDING_MODEL: "${MEMORY_EMBEDDING_MODEL:?set MEMORY_EMBEDDING_MODEL}"
@@ -29,6 +35,7 @@ services:
       MEMORY_LLM_THINK_LEVEL: "${MEMORY_LLM_THINK_LEVEL:-}"
     volumes:
       - agent-memory-data:/app/data
+    stop_grace_period: 45s
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7337/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s

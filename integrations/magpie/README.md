@@ -16,9 +16,10 @@ Once enabled in Magpie, every local AI coding client passing through the gateway
    - Suppresses recently recalled memory IDs for `minRepeatedTurns` turns (default `8`), skips trivial greetings/slash commands, and skips mid-loop tool-result continuations.
 2. **After streaming completes (`onResponse` gateway hook)**:
    - Runs fire-and-forget after client EOF (never adds latency to replies).
-   - Extracts the clean user + assistant exchange (stripping `thinking`, `reasoning`, `tool_use`, `functionCall`, and `<relevant-memories>` blocks), deduplicates by SHA-256 content hash, and posts it to `POST /v1/capture`.
+   - Extracts the clean user + assistant exchange (stripping `thinking`, `reasoning`, `tool_use`, `functionCall`, and `<relevant-memories>` blocks), deduplicates by SHA-256 content hash, and posts it to `POST /v1/capture` with `mode: "async"` and `idempotencyKey`.
 3. **On-demand MCP tools (`/mcp/magpie/tools`)**:
    - Exposes `magpie-agent-memory_recall`, `magpie-agent-memory_capture`, and `magpie-agent-memory_health` through Magpie's built-in Plugin Tools MCP server (`http://127.0.0.1:3425/mcp/magpie/tools`), letting any MCP-capable client explicitly search, store, or health-check shared memory without extra per-client setup.
+   - `capture` sends `mode: "async"` + `idempotencyKey` (returning `202 Accepted` immediately on async servers). Even against older synchronous servers, `capture` decouples the HTTP request on an extended `captureTimeoutMs` (`150000` ms / 150s), hands off cleanly before Magpie's 55s plugin-tool timeout (`captureSoftWaitMs`, default `45000` ms), and deduplicates identical retries within `captureDedupWindowMs` (`180000` ms) so duplicate observations are never sent.
 
 ---
 
@@ -93,7 +94,10 @@ magpie plugin options magpie-agent-memory '{
 | `agentId` | string | Auto-detected from `ctx.agent` | Optional fixed logical `agentId` override |
 | `recallEnabled` | boolean | `true` | Enable `onRequest` automatic memory recall |
 | `captureEnabled` | boolean | `true` | Enable `onResponse` fire-and-forget memory capture |
-| `recallTimeoutMs` | integer (`1`–`8000`) | `2500` | Inner timeout for `/v1/recall` |
+| `recallTimeoutMs` | integer (`1`–`25000`) | `2500` | Inner timeout for `/v1/recall` |
+| `captureTimeoutMs` | integer (`5000`–`300000`) | `150000` | Detached background timeout for `capture` HTTP requests (150s) |
+| `captureSoftWaitMs` | integer (`50`–`50000`, recommended `1000`–`50000`) | `45000` | Wait budget before `capture` hands off cleanly to background completion prior to Magpie's 55s tool cutoff |
+| `captureDedupWindowMs` | integer (`0`–`3600000`) | `180000` | Client-side deduplication window suppressing identical retries after submission or timeout |
 | `maxItems` | integer | `3` | Maximum memories injected per turn |
 | `maxChars` | integer | `600` | Total character budget for injected memory summaries |
 | `perItemMaxChars` | integer | `220` | Character cap per individual memory line |
